@@ -2,6 +2,8 @@
 import { useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
+import rehypeKatex from "rehype-katex";
 
 // Editable Cell Component (Styled for alignment)
 const EditableCell = ({
@@ -87,7 +89,8 @@ export default function Home() {
 
 		try {
 			setStatus("Checking Physics & Solving...");
-			const solveRes = await fetch("http://localhost:8000/solve", {
+			const API_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000";
+			const solveRes = await fetch(`${API_URL}/solve`, {
 				method: "POST",
 				headers: { "Content-Type": "application/json" },
 				body: JSON.stringify(payload),
@@ -454,11 +457,58 @@ export default function Home() {
 						{/* Bottom Row: AI Explanation */}
 						<div className="bg-white p-8 rounded-xl shadow-lg border min-h-[300px]">
 							<h2 className="text-2xl font-bold text-gray-800 mb-6 flex justify-between border-b pb-4">
-								<span>Detailed Solution</span>
+								<span>📘 Detailed Step-by-Step Solution</span>
 								{loading && <span className="text-sm font-normal text-blue-600 animate-pulse">AI is writing...</span>}
 							</h2>
-							<div className="prose prose-slate max-w-none prose-headings:text-blue-800 prose-table:border prose-th:bg-gray-100 prose-th:p-3 prose-td:p-3">
-								<ReactMarkdown remarkPlugins={[remarkGfm]}>{explanation}</ReactMarkdown>
+							<div className="solution-content">
+								<ReactMarkdown
+									remarkPlugins={[remarkGfm, remarkMath]}
+									rehypePlugins={[rehypeKatex]}
+									components={{
+										h2: ({ children }) => (
+											<h2 className="text-xl font-bold text-blue-800 mt-8 mb-4 pb-2 border-b-2 border-blue-200 flex items-center gap-2">
+												{children}
+											</h2>
+										),
+										h3: ({ children }) => <h3 className="text-lg font-semibold text-gray-700 mt-6 mb-3">{children}</h3>,
+										p: ({ children }) => <p className="text-gray-600 leading-relaxed mb-4">{children}</p>,
+										ul: ({ children }) => <ul className="list-disc list-inside mb-4 space-y-1 text-gray-600">{children}</ul>,
+										ol: ({ children }) => <ol className="list-decimal list-inside mb-4 space-y-1 text-gray-600">{children}</ol>,
+										li: ({ children }) => <li className="ml-4">{children}</li>,
+										strong: ({ children }) => <strong className="font-semibold text-gray-800">{children}</strong>,
+										table: ({ children }) => (
+											<div className="overflow-x-auto my-6 rounded-lg border border-gray-200 shadow-sm">
+												<table className="w-full text-sm border-collapse">{children}</table>
+											</div>
+										),
+										thead: ({ children }) => <thead className="bg-gradient-to-r from-blue-50 to-blue-100">{children}</thead>,
+										tbody: ({ children }) => <tbody className="divide-y divide-gray-100">{children}</tbody>,
+										tr: ({ children }) => <tr className="hover:bg-gray-50 transition-colors">{children}</tr>,
+										th: ({ children }) => (
+											<th className="px-4 py-3 text-left font-semibold text-blue-900 text-xs uppercase tracking-wider border-b-2 border-blue-200">
+												{children}
+											</th>
+										),
+										td: ({ children }) => <td className="px-4 py-3 text-gray-700 font-mono text-sm">{children}</td>,
+										code: ({ children, className }) => {
+											const isInline = !className;
+											return isInline ? (
+												<code className="bg-blue-50 text-blue-800 px-1.5 py-0.5 rounded text-sm font-mono">{children}</code>
+											) : (
+												<code className="block bg-gray-900 text-gray-100 p-4 rounded-lg overflow-x-auto text-sm font-mono my-4">
+													{children}
+												</code>
+											);
+										},
+										blockquote: ({ children }) => (
+											<blockquote className="border-l-4 border-blue-400 bg-blue-50 pl-4 py-2 my-4 italic text-gray-600">
+												{children}
+											</blockquote>
+										),
+									}}
+								>
+									{explanation}
+								</ReactMarkdown>
 							</div>
 						</div>
 					</div>
