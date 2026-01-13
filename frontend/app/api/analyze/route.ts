@@ -40,12 +40,15 @@ export async function POST(request: Request) {
     }
     Rules:
     - Demand: Positive (+) for Inflow (Source), Negative (-) for Outflow (Load).
+    - length: Pipe length. If not visible in image, use 0 (will be assumed as 1 by solver).
+    - diameter: Pipe diameter. If not visible in image, use 0 (will be assumed as 1 by solver).
     - roughness: Darcy friction factor 'f'. If unspecified, use 0.02.
     - resistance_k: If the image directly provides K, R, or resistance coefficient, use that value. Otherwise set to null.
       - Look for labels like "K=", "R=", "r=", "resistance=", or similar.
       - Common formats: K=500, R=1000, r=200 (units are s²/m⁵ typically)
     - Units: Assume SI (meters) unless marked otherwise.
     - If you see both f (friction factor) AND K (resistance), include both values.
+    - IMPORTANT: If length/diameter are not shown, it's okay to use 0 - the solver handles this.
     `;
 
 		console.log(" Sending to Gemini 2.5 flash...");

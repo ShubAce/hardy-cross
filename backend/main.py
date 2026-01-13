@@ -44,24 +44,24 @@ def validate_and_fix_network(nodes: List[NodeInput], pipes: List[PipeInput]) -> 
     Validates and fixes the network data to ensure it's physically solvable.
     - Fills missing pipe properties with reasonable defaults
     - Balances node demands for continuity
-    """
-    # 1. SMART LENGTH ASSUMPTION
-    valid_lengths = [p.length for p in pipes if p.length > 0.1]
     
-    if not valid_lengths:
-        print("ℹ️ Info: No lengths detected. Assuming L=1000m for all.")
-        fill_length = 1000.0
-    else:
-        fill_length = sum(valid_lengths) / len(valid_lengths)
-
+    If length and diameter are not provided, assume both as 1.
+    This simplifies the K calculation to just use the friction factor directly
+    when K = 8fL/(π²gD⁵) with L=1, D=1 → K ≈ 0.0826 * f
+    """
     for p in pipes:
-        # Fix Length (minimum 1m)
-        if p.length <= 0.1:
-            p.length = fill_length
+        # If K is directly provided, length and diameter don't matter for calculation
+        # But we still set defaults for display purposes
         
-        # Fix Diameter (Default to 300mm = 0.3m if missing)
-        if p.diameter <= 0:
-            p.diameter = 0.3
+        # Fix Length - if not detected, assume 1 (unitless for simplified problems)
+        if p.length <= 0 or p.length is None:
+            p.length = 1.0
+            print(f"ℹ️ Pipe {p.id}: Length not detected, assuming L=1")
+        
+        # Fix Diameter - if not detected, assume 1 (unitless for simplified problems)
+        if p.diameter <= 0 or p.diameter is None:
+            p.diameter = 1.0
+            print(f"ℹ️ Pipe {p.id}: Diameter not detected, assuming D=1")
         
         # Fix Roughness/Friction factor
         # Typical Darcy friction factors: 0.01 - 0.05
