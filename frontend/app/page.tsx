@@ -280,18 +280,18 @@ export default function Home() {
 													/>
 												</td>
 
-												{/* Length Column (Blue Tint) */}
+												{/* Length Column (Blue Tint) - default to 1 if not provided */}
 												<td className="p-2 bg-blue-50/30">
 													<EditableCell
-														value={p.length}
+														value={p.length === 0 || p.length === null || p.length === undefined ? 1 : p.length}
 														onChange={(v) => updatePipe(i, "length", v)}
 													/>
 												</td>
 
-												{/* Diameter Column */}
+												{/* Diameter Column - default to 1 if not provided */}
 												<td className="p-2">
 													<EditableCell
-														value={p.diameter}
+														value={p.diameter === 0 || p.diameter === null || p.diameter === undefined ? 1 : p.diameter}
 														onChange={(v) => updatePipe(i, "diameter", v)}
 													/>
 												</td>
@@ -399,19 +399,23 @@ export default function Home() {
 							{/* Final Answer Table */}
 							<div className="bg-white p-6 rounded-xl shadow-lg border flex flex-col">
 								<h3 className="text-xl font-bold text-green-700 mb-2 flex items-center gap-2">✅ Final Calculation Results</h3>
-								<p className="text-sm text-gray-500 mb-4">
+								<p className="text-sm text-gray-500 mb-2">
 									{solution.converged
 										? `Converged in ${solution.iterations} iteration(s)`
 										: `⚠️ Did not converge after ${solution.iterations} iterations`}
 								</p>
+								<div className="text-xs mb-4 p-2 bg-blue-50 rounded border border-blue-200">
+									<strong>📌 Sign Convention:</strong> <span className="text-blue-700">+Q</span> = flow from{" "}
+									<strong>Start→End</strong> node | <span className="text-orange-700">−Q</span> = flow from{" "}
+									<strong>End→Start</strong> node
+								</div>
 								<div className="overflow-x-auto flex-grow">
 									<table className="w-full text-left text-sm border-collapse">
 										<thead>
 											<tr className="bg-green-50 text-green-900 text-xs uppercase tracking-wider border-b-2 border-green-200">
 												<th className="p-3">Pipe</th>
 												<th className="p-3 text-right bg-purple-50 text-purple-800">K (s²/m⁵)</th>
-												<th className="p-3 text-right">Flow (Q)</th>
-												<th className="p-3 text-center">Dir</th>
+												<th className="p-3 text-right">Flow Q (m³/s)</th>
 												<th className="p-3 text-right">Velocity</th>
 												<th className="p-3 text-right">Head Loss</th>
 											</tr>
@@ -429,17 +433,13 @@ export default function Home() {
 															({r.K_source === "provided" ? "given" : "calc"})
 														</span>
 													</td>
-													<td className="p-3 text-right font-mono font-medium border-b">
-														{Math.abs(r.flow).toFixed(5)} m³/s
-													</td>
-													<td className="p-3 text-center border-b">
-														<span
-															className={`px-2 py-1 rounded text-xs font-medium ${
-																r.flow >= 0 ? "bg-blue-100 text-blue-800" : "bg-orange-100 text-orange-800"
-															}`}
-														>
-															{r.flow >= 0 ? "→" : "←"}
-														</span>
+													<td
+														className={`p-3 text-right font-mono font-medium border-b ${
+															r.flow >= 0 ? "text-blue-700" : "text-orange-700"
+														}`}
+													>
+														{r.flow >= 0 ? "+" : ""}
+														{r.flow.toFixed(5)}
 													</td>
 													<td className="p-3 text-right border-b">{r.velocity} m/s</td>
 													<td className="p-3 text-right border-b">{r.head_loss} m</td>
