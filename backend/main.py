@@ -28,6 +28,7 @@ class PipeInput(BaseModel):
     length: float
     diameter: float
     roughness: float  # Darcy friction factor (f)
+    resistance_k: Optional[float] = None  # Direct resistance coefficient (K or R)
 
 class NodeInput(BaseModel):
     id: str
@@ -89,7 +90,10 @@ def validate_and_fix_network(nodes: List[NodeInput], pipes: List[PipeInput]) -> 
 # --- DARCY-WEISBACH PHYSICS ---
 def calculate_resistance_coefficient(pipe: PipeInput) -> float:
     """
-    Calculate the resistance coefficient K for the Darcy-Weisbach equation.
+    Get the resistance coefficient K for the Darcy-Weisbach equation.
+    
+    If K is directly provided (resistance_k), use it.
+    Otherwise, calculate from friction factor:
     
     Head loss: h_f = K * Q * |Q|
     
@@ -100,12 +104,23 @@ def calculate_resistance_coefficient(pipe: PipeInput) -> float:
     D = pipe diameter (m)
     g = gravitational acceleration (m/s²)
     """
+    # If K is directly provided, use it
+    if pipe.resistance_k is not None and pipe.resistance_k > 0:
+        return pipe.resistance_k
+    
+    # Otherwise calculate from friction factor
     f = pipe.roughness  # Darcy friction factor
     L = pipe.length
     D = pipe.diameter
     
     K = (8.0 * f * L) / (PI**2 * GRAVITY * D**5)
     return K
+
+def get_k_source(pipe: PipeInput) -> str:
+    """Returns whether K was provided directly or calculated."""
+    if pipe.resistance_k is not None and pipe.resistance_k > 0:
+        return "provided"
+    return "calculated"
 
 def calculate_head_loss(K: float, Q: float) -> float:
     """
@@ -383,7 +398,9 @@ def solve_network(data: NetworkInput):
             "flow_direction": "start→end" if Q >= 0 else "end→start",
             "velocity": round(velocity, 4),
             "head_loss": round(head_loss, 4),
-            "reynolds": round(Re, 0)
+            "reynolds": round(Re, 0),
+            "K": round(K, 4),
+            "K_source": get_k_source(pipe)
         })
 
     return {

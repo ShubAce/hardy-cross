@@ -1,14 +1,25 @@
 "use client";
-import { useState } from "react";
+import { useState, useRef } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
 // Editable Cell Component (Styled for alignment)
-const EditableCell = ({ value, onChange, type = "number" }: { value: any; onChange: (val: any) => void; type?: string }) => {
+const EditableCell = ({
+	value,
+	onChange,
+	type = "number",
+	placeholder = "",
+}: {
+	value: any;
+	onChange: (val: any) => void;
+	type?: string;
+	placeholder?: string;
+}) => {
 	return (
 		<input
 			type={type}
-			className="w-full bg-blue-50 border-b border-blue-200 focus:border-blue-600 outline-none px-2 py-1 text-right font-mono text-sm text-gray-800 transition"
+			placeholder={placeholder}
+			className="w-full bg-blue-50 border-b border-blue-200 focus:border-blue-600 outline-none px-2 py-1 text-right font-mono text-sm text-gray-800 transition placeholder:text-gray-400 placeholder:text-xs"
 			value={value}
 			onChange={(e) => onChange(e.target.value)}
 		/>
@@ -17,6 +28,10 @@ const EditableCell = ({ value, onChange, type = "number" }: { value: any; onChan
 
 export default function Home() {
 	const [image, setImage] = useState<string | null>(null);
+	const videoRef = useRef<HTMLVideoElement>(null);
+	const canvasRef = useRef<HTMLCanvasElement>(null);
+	const [showCamera, setShowCamera] = useState(false);
+	const [stream, setStream] = useState<MediaStream | null>(null);
 
 	// State for Editable Data
 	const [nodes, setNodes] = useState<any[]>([]);
@@ -29,37 +44,84 @@ export default function Home() {
 	const [errorMsg, setErrorMsg] = useState<string | null>(null);
 	const [step, setStep] = useState(1);
 
+	// Process image (shared between upload and camera)
+	const processImage = async (base64: string) => {
+		setLoading(true);
+		setStatus("Reading diagram (AI Vision)...");
+		setErrorMsg(null);
+		setImage(base64);
+
+		try {
+			const res = await fetch("/api/analyze", {
+				method: "POST",
+				body: JSON.stringify({ image: base64 }),
+			});
+			const data = await res.json();
+			if (!res.ok) throw new Error(data.error);
+
+			setNodes(data.nodes || []);
+			setPipes(data.pipes || []);
+			setStep(2);
+		} catch (err: any) {
+			setErrorMsg(err.message);
+		}
+		setLoading(false);
+	};
+
 	// 1. Upload & Vision
 	const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
 		const file = e.target.files?.[0];
 		if (!file) return;
 
-		setLoading(true);
-		setStatus("Reading diagram (AI Vision)...");
-		setErrorMsg(null);
-
 		const reader = new FileReader();
 		reader.onloadend = async () => {
 			const base64 = reader.result as string;
-			setImage(base64);
-
-			try {
-				const res = await fetch("/api/analyze", {
-					method: "POST",
-					body: JSON.stringify({ image: base64 }),
-				});
-				const data = await res.json();
-				if (!res.ok) throw new Error(data.error);
-
-				setNodes(data.nodes || []);
-				setPipes(data.pipes || []);
-				setStep(2);
-			} catch (err: any) {
-				setErrorMsg(err.message);
-			}
-			setLoading(false);
+			await processImage(base64);
 		};
 		reader.readAsDataURL(file);
+	};
+
+	// Camera functions
+	const startCamera = async () => {
+		try {
+			const mediaStream = await navigator.mediaDevices.getUserMedia({
+				video: { facingMode: "environment" },
+			});
+			setStream(mediaStream);
+			setShowCamera(true);
+			setTimeout(() => {
+				if (videoRef.current) {
+					videoRef.current.srcObject = mediaStream;
+				}
+			}, 100);
+		} catch (err: any) {
+			setErrorMsg("Camera access denied. Please allow camera permissions.");
+		}
+	};
+
+	const stopCamera = () => {
+		if (stream) {
+			stream.getTracks().forEach((track) => track.stop());
+			setStream(null);
+		}
+		setShowCamera(false);
+	};
+
+	const captureImage = async () => {
+		if (!videoRef.current || !canvasRef.current) return;
+
+		const video = videoRef.current;
+		const canvas = canvasRef.current;
+		canvas.width = video.videoWidth;
+		canvas.height = video.videoHeight;
+
+		const ctx = canvas.getContext("2d");
+		if (ctx) {
+			ctx.drawImage(video, 0, 0);
+			const base64 = canvas.toDataURL("image/jpeg", 0.9);
+			stopCamera();
+			await processImage(base64);
+		}
 	};
 
 	// 2. Solve & Stream
@@ -116,6 +178,9 @@ export default function Home() {
 		// If updating 'start' or 'end' nodes, keep as string. Otherwise parse float.
 		if (field === "start_node" || field === "end_node" || field === "id") {
 			newPipes[idx][field] = val;
+		} else if (field === "resistance_k") {
+			// K can be empty (will be calculated) or a number
+			newPipes[idx][field] = val === "" ? null : parseFloat(val) || null;
 		} else {
 			newPipes[idx][field] = parseFloat(val) || 0;
 		}
@@ -159,20 +224,64 @@ export default function Home() {
 
 				{/* STEP 1: UPLOAD */}
 				{step === 1 && (
-					<div className="max-w-xl mx-auto mt-10 border-4 border-dashed border-gray-300 rounded-2xl p-16 text-center bg-white hover:border-blue-400 transition shadow-sm">
-						<div className="text-6xl mb-4">📐</div>
-						<h3 className="text-xl font-bold text-gray-700 mb-2">Upload Network Diagram</h3>
-						<p className="text-gray-400 mb-6">Supports PNG, JPG schematics</p>
-						<label className="bg-blue-600 text-white px-8 py-3 rounded-full font-bold shadow-lg hover:bg-blue-700 cursor-pointer inline-block transition">
-							Select Image
-							<input
-								type="file"
-								onChange={handleUpload}
-								accept="image/*"
-								className="hidden"
-							/>
-						</label>
-						{loading && <p className="mt-6 text-blue-600 animate-pulse font-medium">{status}</p>}
+					<div className="max-w-xl mx-auto mt-10">
+						{!showCamera ? (
+							<div className="border-4 border-dashed border-gray-300 rounded-2xl p-16 text-center bg-white hover:border-blue-400 transition shadow-sm">
+								<div className="text-6xl mb-4">📐</div>
+								<h3 className="text-xl font-bold text-gray-700 mb-2">Upload Network Diagram</h3>
+								<p className="text-gray-400 mb-6">Supports PNG, JPG schematics</p>
+								<div className="flex flex-col sm:flex-row gap-4 justify-center">
+									<label className="bg-blue-600 text-white px-8 py-3 rounded-full font-bold shadow-lg hover:bg-blue-700 cursor-pointer inline-flex items-center gap-2 transition">
+										<span>📁</span> Select Image
+										<input
+											type="file"
+											onChange={handleUpload}
+											accept="image/*"
+											className="hidden"
+										/>
+									</label>
+									<button
+										onClick={startCamera}
+										className="bg-green-600 text-white px-8 py-3 rounded-full font-bold shadow-lg hover:bg-green-700 inline-flex items-center gap-2 transition"
+									>
+										<span>📷</span> Use Camera
+									</button>
+								</div>
+								{loading && <p className="mt-6 text-blue-600 animate-pulse font-medium">{status}</p>}
+							</div>
+						) : (
+							<div className="border-4 border-green-400 rounded-2xl p-6 text-center bg-white shadow-lg">
+								<h3 className="text-xl font-bold text-gray-700 mb-4">📷 Camera Preview</h3>
+								<div className="relative rounded-lg overflow-hidden bg-black mb-4">
+									<video
+										ref={videoRef}
+										autoPlay
+										playsInline
+										muted
+										className="w-full max-h-[400px] object-contain"
+									/>
+								</div>
+								<canvas
+									ref={canvasRef}
+									className="hidden"
+								/>
+								<div className="flex gap-4 justify-center">
+									<button
+										onClick={captureImage}
+										className="bg-green-600 text-white px-8 py-3 rounded-full font-bold shadow-lg hover:bg-green-700 inline-flex items-center gap-2 transition"
+									>
+										<span>📸</span> Capture
+									</button>
+									<button
+										onClick={stopCamera}
+										className="bg-gray-500 text-white px-8 py-3 rounded-full font-bold shadow-lg hover:bg-gray-600 transition"
+									>
+										Cancel
+									</button>
+								</div>
+								{loading && <p className="mt-4 text-blue-600 animate-pulse font-medium">{status}</p>}
+							</div>
+						)}
 					</div>
 				)}
 
@@ -202,23 +311,19 @@ export default function Home() {
 							{/* PIPES TABLE - FIXED HEADERS & WIDTHS */}
 							<h3 className="text-sm font-bold text-gray-700 uppercase mb-2 flex items-center gap-2">
 								<span>Pipe Properties</span>
-								<span className="text-xs font-normal text-gray-400 normal-case">
-									(Length and Roughness auto-corrected if missing)
-								</span>
+								<span className="text-xs font-normal text-gray-400 normal-case">(K auto-calculated from f if not provided)</span>
 							</h3>
 							<div className="overflow-auto max-h-80 mb-8 border rounded-lg shadow-sm bg-white">
-								<table className="w-full text-sm text-left border-collapse table-fixed">
+								<table className="w-full text-sm text-left border-collapse">
 									<thead className="bg-gray-100 text-gray-600 uppercase text-xs sticky top-0 z-10">
 										<tr>
-											{/* ID & Topology (Width: 20%) */}
-											<th className="p-3 border-b w-[10%]">ID</th>
-											<th className="p-3 border-b text-center w-[10%]">Start</th>
-											<th className="p-3 border-b text-center w-[10%]">End</th>
-
-											{/* Physical Props (Width: 20% each) */}
-											<th className="p-3 border-b text-right w-[20%] bg-blue-50 text-blue-800">Length (m)</th>
-											<th className="p-3 border-b text-right w-[20%]">Diam (m)</th>
-											<th className="p-3 border-b text-right w-[20%] bg-orange-50 text-orange-800">Roughness (f)</th>
+											<th className="p-3 border-b">ID</th>
+											<th className="p-3 border-b text-center">Start</th>
+											<th className="p-3 border-b text-center">End</th>
+											<th className="p-3 border-b text-right bg-blue-50 text-blue-800">Length (m)</th>
+											<th className="p-3 border-b text-right">Diam (m)</th>
+											<th className="p-3 border-b text-right bg-orange-50 text-orange-800">f (friction)</th>
+											<th className="p-3 border-b text-right bg-purple-50 text-purple-800">K or R</th>
 										</tr>
 									</thead>
 									<tbody className="bg-white">
@@ -270,6 +375,16 @@ export default function Home() {
 													<EditableCell
 														value={p.roughness}
 														onChange={(v) => updatePipe(i, "roughness", v)}
+														placeholder="0.02"
+													/>
+												</td>
+
+												{/* K/R Column (Purple Tint) - Direct resistance coefficient */}
+												<td className="p-2 bg-purple-50/30">
+													<EditableCell
+														value={p.resistance_k ?? ""}
+														onChange={(v) => updatePipe(i, "resistance_k", v)}
+														placeholder="auto"
 													/>
 												</td>
 											</tr>
@@ -277,6 +392,10 @@ export default function Home() {
 									</tbody>
 								</table>
 							</div>
+							<p className="text-xs text-gray-500 mb-4 bg-purple-50 p-2 rounded border border-purple-200">
+								<strong>💡 K/R:</strong> If given directly in the image, enter it. Otherwise leave as "auto" and it will be calculated
+								from: K = 8fL / (π²gD⁵)
+							</p>
 
 							{/* NODES TABLE */}
 							<h3 className="text-sm font-bold text-gray-700 uppercase mb-2">Node Demands</h3>
@@ -363,9 +482,10 @@ export default function Home() {
 									<table className="w-full text-left text-sm border-collapse">
 										<thead>
 											<tr className="bg-green-50 text-green-900 text-xs uppercase tracking-wider border-b-2 border-green-200">
-												<th className="p-3">Pipe ID</th>
+												<th className="p-3">Pipe</th>
+												<th className="p-3 text-right bg-purple-50 text-purple-800">K (s²/m⁵)</th>
 												<th className="p-3 text-right">Flow (Q)</th>
-												<th className="p-3 text-center">Direction</th>
+												<th className="p-3 text-center">Dir</th>
 												<th className="p-3 text-right">Velocity</th>
 												<th className="p-3 text-right">Head Loss</th>
 											</tr>
@@ -377,6 +497,12 @@ export default function Home() {
 													className={idx % 2 === 0 ? "bg-white" : "bg-gray-50"}
 												>
 													<td className="p-3 font-bold border-b">{r.pipe_id}</td>
+													<td className="p-3 text-right font-mono border-b bg-purple-50/30">
+														<span className="font-medium">{r.K}</span>
+														<span className="text-xs text-gray-400 ml-1">
+															({r.K_source === "provided" ? "given" : "calc"})
+														</span>
+													</td>
 													<td className="p-3 text-right font-mono font-medium border-b">
 														{Math.abs(r.flow).toFixed(5)} m³/s
 													</td>
