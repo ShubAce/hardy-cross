@@ -1,13 +1,12 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List, Optional, Dict, Tuple
 import math
 import networkx as nx
 
 app = FastAPI()
 
-# --- CORS SETUP ---
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
@@ -16,247 +15,390 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-GRAVITY = 9.81
+# Physical Constants
+GRAVITY = 9.81  # m/s²
 PI = math.pi
+KINEMATIC_VISCOSITY = 1.0e-6  # m²/s (water at ~20°C)
 
-# --- MODELS ---
+# --- ROBUST MODELS ---
 class PipeInput(BaseModel):
     id: str
     start_node: str
     end_node: str
     length: float
     diameter: float
-    roughness: float # Darcy f
+    roughness: float  # Darcy friction factor (f)
 
 class NodeInput(BaseModel):
     id: str
-    demand: float # +ve = Inflow (Source), -ve = Outflow (Load)
+    demand: float  # Positive = inflow (source), Negative = outflow (demand)
 
 class NetworkInput(BaseModel):
     pipes: List[PipeInput]
     nodes: List[NodeInput]
 
-# --- HELPER: CALCULATE K (RESISTANCE) ---
-def calculate_k(pipe: PipeInput):
-    # Darcy-Weisbach: h_f = K * Q^2
-    # K = (8 * f * L) / (pi^2 * g * D^5)
-    if pipe.diameter == 0: return 1e12 # Prevent div/0
-    return (8 * pipe.roughness * pipe.length) / (PI**2 * GRAVITY * pipe.diameter**5)
-
-# --- CRITICAL: INITIALIZATION ALGORITHM ---
-def initialize_flows_path_method(nodes, pipes):
+# --- ROBUSTNESS CHECKS ---
+def validate_and_fix_network(nodes: List[NodeInput], pipes: List[PipeInput]) -> Tuple[List[NodeInput], List[PipeInput]]:
     """
-    Satisfies continuity (Sigma Q = 0) by pushing demand from Sources to Sinks
-    along the shortest paths.
+    Validates and fixes the network data to ensure it's physically solvable.
+    - Fills missing pipe properties with reasonable defaults
+    - Balances node demands for continuity
+    """
+    # 1. SMART LENGTH ASSUMPTION
+    valid_lengths = [p.length for p in pipes if p.length > 0.1]
+    
+    if not valid_lengths:
+        print("ℹ️ Info: No lengths detected. Assuming L=1000m for all.")
+        fill_length = 1000.0
+    else:
+        fill_length = sum(valid_lengths) / len(valid_lengths)
+
+    for p in pipes:
+        # Fix Length (minimum 1m)
+        if p.length <= 0.1:
+            p.length = fill_length
+        
+        # Fix Diameter (Default to 300mm = 0.3m if missing)
+        if p.diameter <= 0:
+            p.diameter = 0.3
+        
+        # Fix Roughness/Friction factor
+        # Typical Darcy friction factors: 0.01 - 0.05
+        # If value seems invalid (<=0 or >1), use default
+        if p.roughness <= 0 or p.roughness > 1.0:
+            p.roughness = 0.02
+
+    # 2. CONTINUITY CHECK (Conservation of Mass)
+    # Sum of all demands must equal zero
+    total_demand = sum(n.demand for n in nodes)
+    
+    if abs(total_demand) > 1e-6:
+        # Find the source node (largest positive demand) and adjust it
+        source_nodes = [n for n in nodes if n.demand > 0]
+        if source_nodes:
+            max_node = max(source_nodes, key=lambda n: n.demand)
+        else:
+            # No source found, adjust the node with largest absolute demand
+            max_node = max(nodes, key=lambda n: abs(n.demand))
+        
+        max_node.demand -= total_demand
+        print(f"⚠️ Warning: Demands unbalanced by {total_demand:.6f} m³/s. Adjusted node '{max_node.id}'.")
+
+    return nodes, pipes
+
+# --- DARCY-WEISBACH PHYSICS ---
+def calculate_resistance_coefficient(pipe: PipeInput) -> float:
+    """
+    Calculate the resistance coefficient K for the Darcy-Weisbach equation.
+    
+    Head loss: h_f = K * Q * |Q|
+    
+    Where K = (8 * f * L) / (π² * g * D⁵)
+    
+    f = Darcy friction factor (dimensionless)
+    L = pipe length (m)
+    D = pipe diameter (m)
+    g = gravitational acceleration (m/s²)
+    """
+    f = pipe.roughness  # Darcy friction factor
+    L = pipe.length
+    D = pipe.diameter
+    
+    K = (8.0 * f * L) / (PI**2 * GRAVITY * D**5)
+    return K
+
+def calculate_head_loss(K: float, Q: float) -> float:
+    """
+    Calculate head loss using Darcy-Weisbach equation.
+    h_f = K * Q * |Q|
+    
+    The sign preserves direction: 
+    - Positive Q → Positive head loss in flow direction
+    - Negative Q → Negative head loss (loss in opposite direction)
+    """
+    return K * Q * abs(Q)
+
+def calculate_head_loss_derivative(K: float, Q: float) -> float:
+    """
+    Calculate derivative of head loss with respect to Q.
+    d(h_f)/dQ = d(K * Q * |Q|)/dQ = 2 * K * |Q|
+    
+    For numerical stability, add small epsilon when Q ≈ 0
+    """
+    return 2.0 * K * (abs(Q) + 1e-10)
+
+def initialize_flows_robust(nodes: List[NodeInput], pipes: List[PipeInput]) -> Dict[str, float]:
+    """
+    Initialize pipe flows using path-based flow distribution.
+    
+    Strategy:
+    1. Build a graph of the network
+    2. Find shortest paths from sources (positive demand) to sinks (negative demand)
+    3. Distribute flow along these paths proportionally
+    
+    Flow sign convention:
+    - Positive flow: from start_node to end_node (as defined in pipe)
+    - Negative flow: from end_node to start_node
     """
     G = nx.Graph()
-    # Initialize all flows to 0.0
-    pipe_flows = {p.id: 0.0 for p in pipes}
+    pipe_flows: Dict[str, float] = {p.id: 0.0 for p in pipes}
     
-    # Map for quick lookup
-    pipe_lookup = {}
+    # Map edges to pipe IDs for quick lookup
+    edge_to_pipe_id: Dict[Tuple[str, str], str] = {}
     for p in pipes:
-        # We store both directions for pathfinding lookup
-        pipe_lookup[(p.start_node, p.end_node)] = p.id
-        pipe_lookup[(p.end_node, p.start_node)] = p.id
-        G.add_edge(p.start_node, p.end_node, weight=1) # Unweighted for BFS (fewest pipes)
+        G.add_edge(p.start_node, p.end_node, id=p.id)
+        edge_to_pipe_id[(p.start_node, p.end_node)] = p.id
+        edge_to_pipe_id[(p.end_node, p.start_node)] = p.id
 
-    # Separate Sources (+) and Sinks (-)
-    # We define "Residual Demand" needed at each node
-    node_balances = {n.id: n.demand for n in nodes} 
-
-    # Sinks need water (negative balance). Sources have water (positive).
-    # We iterate until all nodes are balanced (approx 0).
+    # Create pipe lookup
+    pipe_map = {p.id: p for p in pipes}
     
-    # 1. Identify all nodes that need water (Sinks)
-    sinks = [nid for nid, bal in node_balances.items() if bal < -1e-9]
-    sources = [nid for nid, bal in node_balances.items() if bal > 1e-9]
+    # Identify sources (inflow, positive demand) and sinks (outflow, negative demand)
+    node_demands = {n.id: n.demand for n in nodes}
+    sources = sorted(
+        [n_id for n_id, d in node_demands.items() if d > 1e-9],
+        key=lambda x: node_demands[x],
+        reverse=True
+    )
+    sinks = sorted(
+        [n_id for n_id, d in node_demands.items() if d < -1e-9],
+        key=lambda x: node_demands[x]  # Most negative first
+    )
+    
+    # Track remaining capacity at each node
+    remaining_supply = {s: node_demands[s] for s in sources}
+    remaining_demand = {s: -node_demands[s] for s in sinks}  # Convert to positive
 
-    if not sinks and not sources:
-        return pipe_flows # No flow needed
-
-    for sink in sinks:
-        needed = -node_balances[sink] # How much this sink needs
-        if needed <= 0: continue
-
-        # Try to pull water from sources
-        for source in sources:
-            available = node_balances[source]
-            if available <= 0: continue
-
-            # How much can we move?
-            amount = min(needed, available)
+    # Distribute flow from sources to sinks using shortest paths
+    for sink_id in sinks:
+        demand_needed = remaining_demand[sink_id]
+        
+        for source_id in sources:
+            if demand_needed <= 1e-9:
+                break
+            
+            available_supply = remaining_supply.get(source_id, 0)
+            if available_supply <= 1e-9:
+                continue
+            
+            # Flow to transfer
+            flow_amount = min(demand_needed, available_supply)
+            if flow_amount <= 1e-9:
+                continue
 
             try:
-                # Find path from Source -> Sink
-                path = nx.shortest_path(G, source, sink)
+                # Find shortest path from source to sink
+                path = nx.shortest_path(G, source_id, sink_id)
                 
-                # Push flow along this path
+                # Apply flow along the path
                 for i in range(len(path) - 1):
-                    u, v = path[i], path[i+1]
-                    p_id = pipe_lookup.get((u,v))
+                    u, v = path[i], path[i + 1]
+                    pipe_id = edge_to_pipe_id[(u, v)]
+                    pipe_def = pipe_map[pipe_id]
                     
-                    # Find pipe definition to check direction
-                    # If pipe is defined A->B, and we flow A->B, add Flow.
-                    # If we flow B->A, subtract Flow.
-                    # We need the actual pipe object to know its "definition"
-                    # But we only have ID here. We need to look it up later or trust consistent updates.
-                    
-                    # Simpler: We just store the flow relative to the pipe definition.
-                    # We need to look up the pipe object to see its start/end.
-                    # Let's rely on the pipe_flows dict storing Signed Flow.
-                    
-                    # Check definition:
-                    # We iterate pipes later, so let's check definition now
-                    # This is slow but safe.
-                    pipe_def = next(p for p in pipes if p.id == p_id)
-                    
-                    if pipe_def.start_node == u and pipe_def.end_node == v:
-                        pipe_flows[p_id] += amount
+                    # Determine flow direction relative to pipe definition
+                    if pipe_def.start_node == u:
+                        # Flow direction matches pipe definition
+                        pipe_flows[pipe_id] += flow_amount
                     else:
-                        pipe_flows[p_id] -= amount
+                        # Flow direction opposite to pipe definition
+                        pipe_flows[pipe_id] -= flow_amount
                 
-                # Update Balances
-                node_balances[source] -= amount
-                node_balances[sink] += amount
-                available -= amount
-                needed -= amount
-                
-                if needed < 1e-9: break # Sink satisfied
+                # Update remaining capacities
+                remaining_supply[source_id] -= flow_amount
+                remaining_demand[sink_id] -= flow_amount
+                demand_needed -= flow_amount
                 
             except nx.NetworkXNoPath:
-                continue # Try next source
-
+                print(f"⚠️ No path found from {source_id} to {sink_id}")
+                continue
+    
     return pipe_flows
 
-# --- MAIN SOLVER ---
 def solve_network(data: NetworkInput):
-    # 1. Setup
-    pipes_map = {p.id: p for p in data.pipes}
+    """
+    Solve the pipe network using the Hardy Cross iterative method.
     
-    # 2. Build Graph for Loop Detection
-    G_cycle = nx.Graph()
-    for p in data.pipes:
-        G_cycle.add_edge(p.start_node, p.end_node, id=p.id)
+    The Hardy Cross method corrects flow rates iteratively to satisfy:
+    1. Continuity equation at each node (∑Q = 0)
+    2. Energy equation around each loop (∑h_f = 0)
     
-    # Find Loops (Cycle Basis)
+    For each loop, the correction factor is:
+    ΔQ = -∑(h_f) / ∑(dh_f/dQ) = -∑(K·Q·|Q|) / ∑(2·K·|Q|)
+    """
+    # 1. VALIDATION & DATA PREPARATION
+    nodes, pipes = validate_and_fix_network(data.nodes.copy(), data.pipes.copy())
+    pipes_map = {p.id: p for p in pipes}
+
+    # 2. BUILD NETWORK GRAPH & DETECT LOOPS
+    G = nx.Graph()
+    for p in pipes:
+        G.add_edge(p.start_node, p.end_node, id=p.id)
+    
+    # Check connectivity
+    if not nx.is_connected(G):
+        return {"error": "Network is not fully connected. Check pipe definitions."}
+    
+    # Find independent loops (cycle basis)
     try:
-        loops = nx.cycle_basis(G_cycle)
-    except:
-        return {"error": "Could not find closed loops in network."}
+        loops = nx.cycle_basis(G)
+        print(f"📊 Found {len(loops)} independent loop(s)")
+    except Exception as e:
+        return {"error": f"Could not find valid loops: {str(e)}"}
 
     if not loops:
-        # If no loops (branched network), initialization IS the solution.
-        pass
+        # No loops = tree network, flow is determined by continuity alone
+        print("ℹ️ No loops detected - network is a tree (branching) system")
 
-    # 3. Valid Initialization (Crucial Fix)
-    pipe_flows = initialize_flows_path_method(data.nodes, data.pipes)
-    pipe_k = {p.id: calculate_k(p) for p in data.pipes}
+    # 3. INITIALIZE FLOWS (satisfying continuity)
+    pipe_flows = initialize_flows_robust(nodes, pipes)
+    
+    # Calculate resistance coefficients for all pipes
+    pipe_K = {p.id: calculate_resistance_coefficient(p) for p in pipes}
+    
+    # 4. HARDY CROSS ITERATION
+    MAX_ITERATIONS = 100
+    TOLERANCE = 1e-6  # Convergence tolerance for flow correction
     
     history = []
+    converged = False
     
-    # 4. Hardy Cross Iterations
-    MAX_ITER = 50
-    TOLERANCE = 1e-4 # Convergence threshold
-
-    for iter_num in range(MAX_ITER):
-        max_correction = 0
-        iteration_log = {"iteration": iter_num + 1, "loops": []}
+    for iteration in range(MAX_ITERATIONS):
+        max_correction = 0.0
+        iteration_log = {
+            "iteration": iteration + 1,
+            "loops": [],
+            "pipe_flows": {p_id: round(q, 6) for p_id, q in pipe_flows.items()}
+        }
         
-        # We must apply corrections simultaneously or sequentially?
-        # Sequential (applying immediately) is standard for Hardy Cross code usually.
-        
-        for loop_nodes in loops:
-            sum_hl = 0.0
-            sum_deriv = 0.0
-            loop_data_for_update = []
+        # Process each loop
+        for loop_idx, loop_nodes in enumerate(loops):
+            sum_head_loss = 0.0
+            sum_derivative = 0.0
+            loop_pipe_info = []  # Track pipes in this loop for correction
             
-            # Walk the loop A->B->C->A
-            for i in range(len(loop_nodes)):
-                u = loop_nodes[i]
-                v = loop_nodes[(i + 1) % len(loop_nodes)]
+            # Traverse the loop (node sequence)
+            num_nodes = len(loop_nodes)
+            for i in range(num_nodes):
+                node_u = loop_nodes[i]
+                node_v = loop_nodes[(i + 1) % num_nodes]
                 
-                # Identify pipe and direction relative to loop
-                edge_data = G_cycle.get_edge_data(u, v)
-                p_id = edge_data['id']
-                pipe_def = pipes_map[p_id]
+                # Get pipe connecting these nodes
+                edge_data = G.get_edge_data(node_u, node_v)
+                if edge_data is None:
+                    continue
+                    
+                pipe_id = edge_data['id']
+                pipe_def = pipes_map[pipe_id]
+                K = pipe_K[pipe_id]
+                Q = pipe_flows[pipe_id]
                 
-                # Direction: 
-                # +1 if loop traverses u->v AND pipe is u->v
-                # -1 if loop traverses u->v BUT pipe is v->u
-                loop_dir = 1 if pipe_def.start_node == u else -1
+                # Determine loop direction factor
+                # If we traverse u->v and pipe is defined start_node->end_node:
+                #   - If start_node == u: we're going WITH the pipe definition, factor = +1
+                #   - If start_node == v: we're going AGAINST the pipe definition, factor = -1
+                if pipe_def.start_node == node_u:
+                    loop_direction = 1.0
+                else:
+                    loop_direction = -1.0
                 
-                Q = pipe_flows[p_id]
-                K = pipe_k[p_id]
+                # Flow relative to loop traversal direction
+                Q_loop = Q * loop_direction
                 
-                # Head Loss in the pipe (Standard formula: h = K * Q * |Q|)
-                # But we need HL relative to the LOOP direction.
-                # If flow is WITH loop, HL is positive. If AGAINST, negative.
+                # Head loss in loop direction (Darcy-Weisbach: h = K·Q·|Q|)
+                h_f = calculate_head_loss(K, Q_loop)
                 
-                # Real Flow relative to Loop = Q * loop_dir
-                Q_relative = Q * loop_dir
+                # Derivative for Newton-Raphson correction
+                dh_dQ = calculate_head_loss_derivative(K, Q_loop)
                 
-                # HL_relative = K * Q_relative * |Q_relative|
-                hl_rel = K * Q_relative * abs(Q_relative)
+                sum_head_loss += h_f
+                sum_derivative += dh_dQ
                 
-                # Derivative is always positive: 2 * K * |Q_relative|
-                deriv = 2 * K * abs(Q_relative)
-                
-                sum_hl += hl_rel
-                sum_deriv += deriv
-                
-                loop_data_for_update.append({"p_id": p_id, "loop_dir": loop_dir})
-
-            # Calculate Correction Delta Q
-            if sum_deriv < 1e-12:
-                delta_Q = 0
+                loop_pipe_info.append({
+                    "pipe_id": pipe_id,
+                    "loop_direction": loop_direction,
+                    "Q": Q,
+                    "Q_loop": Q_loop,
+                    "h_f": h_f
+                })
+            
+            # Calculate flow correction (Hardy Cross formula)
+            if sum_derivative > 1e-12:
+                delta_Q = -sum_head_loss / sum_derivative
             else:
-                # Formula: Delta = - Sum(HL) / Sum(Deriv)
-                delta_Q = -sum_hl / sum_deriv
-
-            # Store stats
-            iteration_log["loops"].append({
-                "nodes": loop_nodes,
-                "delta_Q": delta_Q,
-                "sum_hl": sum_hl
-            })
-
-            # Apply Correction
+                delta_Q = 0.0
+            
+            # Track maximum correction for convergence check
             if abs(delta_Q) > max_correction:
                 max_correction = abs(delta_Q)
-
-            for item in loop_data_for_update:
-                p_id = item['p_id']
-                loop_dir = item['loop_dir']
+            
+            # Apply correction to all pipes in the loop
+            for pipe_info in loop_pipe_info:
+                pipe_id = pipe_info["pipe_id"]
+                loop_dir = pipe_info["loop_direction"]
                 
-                # Update flow
-                # If loop direction matches pipe definition, we ADD delta
-                # If loop is against pipe definition, we SUBTRACT delta (which is adding delta * -1)
-                pipe_flows[p_id] += delta_Q * loop_dir
-
+                # Correction is applied considering loop direction
+                # If we traverse in same direction as pipe definition: add delta_Q
+                # If opposite: subtract delta_Q (multiply by loop_direction)
+                pipe_flows[pipe_id] += delta_Q * loop_dir
+            
+            iteration_log["loops"].append({
+                "loop_index": loop_idx + 1,
+                "nodes": loop_nodes,
+                "sum_head_loss": round(sum_head_loss, 6),
+                "sum_derivative": round(sum_derivative, 6),
+                "delta_Q": round(delta_Q, 6)
+            })
+        
+        iteration_log["max_correction"] = round(max_correction, 8)
         history.append(iteration_log)
         
+        # Check convergence
         if max_correction < TOLERANCE:
+            converged = True
+            print(f"✅ Converged after {iteration + 1} iterations (max ΔQ = {max_correction:.2e})")
             break
+    
+    if not converged:
+        print(f"⚠️ Did not converge after {MAX_ITERATIONS} iterations (max ΔQ = {max_correction:.2e})")
 
-    # 5. Format Output
+    # 5. COMPUTE FINAL RESULTS
     results = []
-    for p_id, flow in pipe_flows.items():
+    for pipe_id, Q in pipe_flows.items():
+        pipe = pipes_map[pipe_id]
+        K = pipe_K[pipe_id]
+        
+        # Velocity: V = Q / A = 4Q / (πD²)
+        velocity = (4.0 * abs(Q)) / (PI * pipe.diameter**2)
+        
+        # Head loss (absolute value for magnitude)
+        head_loss = abs(calculate_head_loss(K, Q))
+        
+        # Reynolds number for reference
+        Re = (velocity * pipe.diameter) / KINEMATIC_VISCOSITY if velocity > 0 else 0
+        
         results.append({
-            "pipe_id": p_id,
-            "flow": round(flow, 5),
-            "velocity": round(4 * abs(flow) / (PI * pipes_map[p_id].diameter**2), 4),
-            "head_loss": round(pipe_k[p_id] * flow * abs(flow), 4)
+            "pipe_id": pipe_id,
+            "flow": round(Q, 6),
+            "flow_direction": "start→end" if Q >= 0 else "end→start",
+            "velocity": round(velocity, 4),
+            "head_loss": round(head_loss, 4),
+            "reynolds": round(Re, 0)
         })
 
-    return {"converged": max_correction < TOLERANCE, "results": results, "history": history}
+    return {
+        "converged": converged,
+        "iterations": len(history),
+        "results": results,
+        "history": history
+    }
 
 @app.post("/solve")
 async def solve_endpoint(data: NetworkInput):
     try:
         return solve_network(data)
     except Exception as e:
-        print("Backend Error:", str(e))
+        print(f"Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":

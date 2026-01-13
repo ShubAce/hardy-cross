@@ -1,184 +1,417 @@
 "use client";
-import { useState } from 'react';
+import { useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+
+// Editable Cell Component (Styled for alignment)
+const EditableCell = ({ value, onChange, type = "number" }: { value: any; onChange: (val: any) => void; type?: string }) => {
+	return (
+		<input
+			type={type}
+			className="w-full bg-blue-50 border-b border-blue-200 focus:border-blue-600 outline-none px-2 py-1 text-right font-mono text-sm text-gray-800 transition"
+			value={value}
+			onChange={(e) => onChange(e.target.value)}
+		/>
+	);
+};
 
 export default function Home() {
-  const [image, setImage] = useState<string | null>(null);
-  const [networkData, setNetworkData] = useState<any>(null);
-  const [solution, setSolution] = useState<any>(null);
-  const [loading, setLoading] = useState(false);
-  const [errorMsg, setErrorMsg] = useState<string | null>(null); // New Error State
-  const [step, setStep] = useState(1);
+	const [image, setImage] = useState<string | null>(null);
 
-  // 1. Handle Image Upload & Vision
-  const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+	// State for Editable Data
+	const [nodes, setNodes] = useState<any[]>([]);
+	const [pipes, setPipes] = useState<any[]>([]);
 
-    setLoading(true);
-    setErrorMsg(null);
-    const reader = new FileReader();
-    reader.onloadend = async () => {
-      const base64 = reader.result as string;
-      setImage(base64);
-      
-      try {
-        const res = await fetch('/api/analyze', {
-          method: 'POST',
-          body: JSON.stringify({ image: base64 }),
-        });
-        const data = await res.json();
-        
-        if (!res.ok) throw new Error(data.error || "Vision Failed");
+	const [solution, setSolution] = useState<any>(null);
+	const [explanation, setExplanation] = useState<string>("");
+	const [loading, setLoading] = useState(false);
+	const [status, setStatus] = useState("");
+	const [errorMsg, setErrorMsg] = useState<string | null>(null);
+	const [step, setStep] = useState(1);
 
-        setNetworkData(data);
-        setStep(2);
-      } catch (err: any) {
-        setErrorMsg(err.message);
-      }
-      setLoading(false);
-    };
-    reader.readAsDataURL(file);
-  };
+	// 1. Upload & Vision
+	const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+		const file = e.target.files?.[0];
+		if (!file) return;
 
-  // 2. Handle Solve (Call Python)
-  const handleSolve = async () => {
-    setLoading(true);
-    setErrorMsg(null);
-    try {
-      const res = await fetch('http://localhost:8000/solve', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(networkData),
-      });
-      
-      const result = await res.json();
+		setLoading(true);
+		setStatus("Reading diagram (AI Vision)...");
+		setErrorMsg(null);
 
-      // Check if backend returned an error (e.g., 500 Internal Server Error)
-      if (!res.ok) {
-        throw new Error(result.detail || "Solver failed on server.");
-      }
+		const reader = new FileReader();
+		reader.onloadend = async () => {
+			const base64 = reader.result as string;
+			setImage(base64);
 
-      setSolution(result);
-      setStep(3);
-    } catch (err: any) {
-      console.error(err);
-      setErrorMsg(err.message || "Failed to connect to Python backend.");
-    }
-    setLoading(false);
-  };
+			try {
+				const res = await fetch("/api/analyze", {
+					method: "POST",
+					body: JSON.stringify({ image: base64 }),
+				});
+				const data = await res.json();
+				if (!res.ok) throw new Error(data.error);
 
-  return (
-    <div className="p-10 max-w-4xl mx-auto font-sans min-h-screen bg-white text-gray-900">
-      <h1 className="text-3xl font-bold mb-8 text-blue-700">Hardy Cross Solver AI</h1>
+				setNodes(data.nodes || []);
+				setPipes(data.pipes || []);
+				setStep(2);
+			} catch (err: any) {
+				setErrorMsg(err.message);
+			}
+			setLoading(false);
+		};
+		reader.readAsDataURL(file);
+	};
 
-      {/* ERROR MESSAGE DISPLAY */}
-      {errorMsg && (
-        <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-4">
-          <strong>Error: </strong> {errorMsg}
-        </div>
-      )}
+	// 2. Solve & Stream
+	const handleSolveAndExplain = async () => {
+		setLoading(true);
+		setErrorMsg(null);
+		setExplanation("");
 
-      {/* STEP 1: UPLOAD */}
-      {step === 1 && (
-        <div className="border-2 border-dashed border-gray-300 p-12 text-center rounded-lg hover:bg-gray-50 transition">
-          <p className="mb-4 text-gray-500">Upload an image of a pipe network</p>
-          <input 
-            type="file" 
-            onChange={handleUpload} 
-            accept="image/*" 
-            className="block w-full text-sm text-slate-500
-              file:mr-4 file:py-2 file:px-4
-              file:rounded-full file:border-0
-              file:text-sm file:font-semibold
-              file:bg-blue-50 file:text-blue-700
-              hover:file:bg-blue-100"
-          />
-          {loading && <p className="mt-4 text-blue-600 animate-pulse">Analyzing diagram with AI...</p>}
-        </div>
-      )}
+		const payload = { nodes, pipes };
 
-      {/* STEP 2: VERIFY DATA */}
-      {step === 2 && networkData && (
-        <div>
-          <h2 className="text-xl font-bold mb-4">Verify Extracted Data</h2>
-          <p className="text-sm text-gray-500 mb-2">Check if the AI read your diagram correctly.</p>
-          
-          <div className="bg-slate-50 p-4 rounded mb-4 border overflow-auto max-h-96">
-            <pre className="text-xs font-mono">{JSON.stringify(networkData, null, 2)}</pre>
-          </div>
-          
-          <div className="flex gap-4">
-            <button 
-                onClick={handleSolve}
-                className="bg-blue-600 text-white px-6 py-2 rounded hover:bg-blue-700 disabled:opacity-50"
-                disabled={loading}
-            >
-                {loading ? "Solving..." : "Run Hardy Cross Calculation"}
-            </button>
-            <button 
-                onClick={() => setStep(1)}
-                className="bg-gray-200 text-gray-700 px-6 py-2 rounded hover:bg-gray-300"
-            >
-                Cancel
-            </button>
-          </div>
-        </div>
-      )}
+		try {
+			setStatus("Checking Physics & Solving...");
+			const solveRes = await fetch("http://localhost:8000/solve", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify(payload),
+			});
+			const solveResult = await solveRes.json();
+			if (!solveRes.ok) throw new Error(solveResult.detail || "Solver failed");
 
-      {/* STEP 3: RESULTS */}
-      {step === 3 && solution && (
-        <div>
-          <h2 className="text-2xl font-bold mb-6 text-green-700">Calculation Complete</h2>
-          
-          <div className="mb-8 border rounded-lg overflow-hidden">
-            <h3 className="bg-gray-100 p-3 font-bold border-b">Final Flow Rates</h3>
-            <table className="w-full text-left border-collapse">
-              <thead>
-                <tr className="bg-gray-50 border-b text-sm text-gray-600 uppercase">
-                  <th className="p-3">Pipe ID</th>
-                  <th className="p-3">Flow (m³/s)</th>
-                  <th className="p-3">Velocity (m/s)</th>
-                  <th className="p-3">Head Loss (m)</th>
-                </tr>
-              </thead>
-              <tbody>
-                {/* SAFETY CHECK: Use ?. to prevent crash if results are missing */}
-                {solution.results?.map((r: any) => (
-                  <tr key={r.pipe_id} className="border-b hover:bg-gray-50">
-                    <td className="p-3 font-mono font-bold">{r.pipe_id}</td>
-                    <td className="p-3">{r.flow}</td>
-                    <td className="p-3">{r.velocity}</td>
-                    <td className="p-3">{r.head_loss}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+			setSolution(solveResult);
+			setStep(3);
 
-          <div>
-            <h3 className="font-bold text-lg mb-2">Calculation History</h3>
-            <div className="bg-slate-900 text-slate-100 p-4 rounded-lg h-64 overflow-y-scroll font-mono text-xs">
-                {solution.history?.map((h: any) => (
-                    <div key={h.iteration} className="mb-4 border-b border-slate-700 pb-2">
-                        <p className="text-green-400 font-bold">Iteration {h.iteration}</p>
-                        {h.loops.map((l: any, i: number) => (
-                            <p key={i} className="ml-4">
-                                Loop: [{l.nodes.join('-')}] | ΔQ: {l.delta_Q ? l.delta_Q.toFixed(6) : "0.000000"}
-                            </p>
-                        ))}
-                    </div>
-                ))}
-            </div>
-          </div>
-          
-          <button 
-            onClick={() => setStep(1)} 
-            className="mt-8 text-blue-600 underline hover:text-blue-800"
-          >
-            Solve Another Problem
-          </button>
-        </div>
-      )}
-    </div>
-  );
+			setStatus("Streaming Tutorial...");
+			const response = await fetch("/api/explain", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ networkData: payload, solution: solveResult }),
+			});
+
+			if (!response.ok || !response.body) throw new Error(response.statusText);
+
+			const reader = response.body.getReader();
+			const decoder = new TextDecoder();
+			let done = false;
+
+			while (!done) {
+				const { value, done: doneReading } = await reader.read();
+				done = doneReading;
+				const chunkValue = decoder.decode(value, { stream: !done });
+				setExplanation((prev) => prev + chunkValue);
+			}
+			setStatus("Complete");
+		} catch (err: any) {
+			console.error(err);
+			setErrorMsg(err.message || "Process failed.");
+		}
+		setLoading(false);
+	};
+
+	// Handlers for Editing
+	const updatePipe = (idx: number, field: string, val: string) => {
+		const newPipes = [...pipes];
+		// If updating 'start' or 'end' nodes, keep as string. Otherwise parse float.
+		if (field === "start_node" || field === "end_node" || field === "id") {
+			newPipes[idx][field] = val;
+		} else {
+			newPipes[idx][field] = parseFloat(val) || 0;
+		}
+		setPipes(newPipes);
+	};
+
+	const updateNode = (idx: number, field: string, val: string) => {
+		const newNodes = [...nodes];
+		newNodes[idx][field] = field === "id" ? val : parseFloat(val) || 0;
+		setNodes(newNodes);
+	};
+
+	return (
+		<div className="min-h-screen bg-gray-50 text-gray-900 font-sans pb-20">
+			<div className="max-w-7xl mx-auto p-6">
+				{/* HEADER */}
+				<div className="flex justify-between items-center mb-8 border-b pb-4">
+					<div>
+						<h1 className="text-3xl font-bold text-blue-900">Hardy Cross Solver AI</h1>
+						<p className="text-gray-500 text-sm">Automated Hydraulic Analysis</p>
+					</div>
+					{step > 1 && (
+						<button
+							onClick={() => {
+								setStep(1);
+								setImage(null);
+								setExplanation("");
+							}}
+							className="bg-gray-200 px-4 py-2 rounded hover:bg-gray-300 text-sm text-gray-700 font-medium"
+						>
+							Reset
+						</button>
+					)}
+				</div>
+
+				{errorMsg && (
+					<div className="bg-red-50 border-l-4 border-red-500 text-red-700 p-4 mb-6 rounded shadow-sm">
+						<p className="font-bold">Error</p> <p>{errorMsg}</p>
+					</div>
+				)}
+
+				{/* STEP 1: UPLOAD */}
+				{step === 1 && (
+					<div className="max-w-xl mx-auto mt-10 border-4 border-dashed border-gray-300 rounded-2xl p-16 text-center bg-white hover:border-blue-400 transition shadow-sm">
+						<div className="text-6xl mb-4">📐</div>
+						<h3 className="text-xl font-bold text-gray-700 mb-2">Upload Network Diagram</h3>
+						<p className="text-gray-400 mb-6">Supports PNG, JPG schematics</p>
+						<label className="bg-blue-600 text-white px-8 py-3 rounded-full font-bold shadow-lg hover:bg-blue-700 cursor-pointer inline-block transition">
+							Select Image
+							<input
+								type="file"
+								onChange={handleUpload}
+								accept="image/*"
+								className="hidden"
+							/>
+						</label>
+						{loading && <p className="mt-6 text-blue-600 animate-pulse font-medium">{status}</p>}
+					</div>
+				)}
+
+				{/* STEP 2: EDIT & VERIFY DATA (FIXED LAYOUT) */}
+				{step === 2 && (
+					<div className="grid grid-cols-1 lg:grid-cols-2 gap-8 animate-fade-in-up">
+						{/* Left: Image */}
+						<div className="bg-white p-4 rounded-xl shadow border h-fit">
+							<h3 className="font-bold text-gray-400 mb-3 uppercase text-xs tracking-wider">Original Diagram</h3>
+							{image && (
+								<img
+									src={image}
+									alt="Upload"
+									className="w-full rounded-lg border bg-gray-50"
+								/>
+							)}
+						</div>
+
+						{/* Right: Editable Tables */}
+						<div className="bg-white p-6 rounded-xl shadow border flex flex-col h-full">
+							<h2 className="text-xl font-bold mb-2 text-blue-900">Verify & Edit Data</h2>
+							<p className="text-sm text-gray-500 mb-6 bg-yellow-50 p-2 rounded border border-yellow-200">
+								<span className="font-bold">💡 Tip:</span> Check values carefully. Positive flow follows the{" "}
+								<strong>Start → End</strong> direction shown below.
+							</p>
+
+							{/* PIPES TABLE - FIXED HEADERS & WIDTHS */}
+							<h3 className="text-sm font-bold text-gray-700 uppercase mb-2 flex items-center gap-2">
+								<span>Pipe Properties</span>
+								<span className="text-xs font-normal text-gray-400 normal-case">
+									(Length and Roughness auto-corrected if missing)
+								</span>
+							</h3>
+							<div className="overflow-auto max-h-80 mb-8 border rounded-lg shadow-sm bg-white">
+								<table className="w-full text-sm text-left border-collapse table-fixed">
+									<thead className="bg-gray-100 text-gray-600 uppercase text-xs sticky top-0 z-10">
+										<tr>
+											{/* ID & Topology (Width: 20%) */}
+											<th className="p-3 border-b w-[10%]">ID</th>
+											<th className="p-3 border-b text-center w-[10%]">Start</th>
+											<th className="p-3 border-b text-center w-[10%]">End</th>
+
+											{/* Physical Props (Width: 20% each) */}
+											<th className="p-3 border-b text-right w-[20%] bg-blue-50 text-blue-800">Length (m)</th>
+											<th className="p-3 border-b text-right w-[20%]">Diam (m)</th>
+											<th className="p-3 border-b text-right w-[20%] bg-orange-50 text-orange-800">Roughness (f)</th>
+										</tr>
+									</thead>
+									<tbody className="bg-white">
+										{pipes.map((p, i) => (
+											<tr
+												key={i}
+												className="border-b hover:bg-gray-50"
+											>
+												<td className="p-2 font-bold text-gray-700">
+													<EditableCell
+														value={p.id}
+														onChange={(v) => updatePipe(i, "id", v)}
+														type="text"
+													/>
+												</td>
+												<td className="p-2">
+													<EditableCell
+														value={p.start_node}
+														onChange={(v) => updatePipe(i, "start_node", v)}
+														type="text"
+													/>
+												</td>
+												<td className="p-2">
+													<EditableCell
+														value={p.end_node}
+														onChange={(v) => updatePipe(i, "end_node", v)}
+														type="text"
+													/>
+												</td>
+
+												{/* Length Column (Blue Tint) */}
+												<td className="p-2 bg-blue-50/30">
+													<EditableCell
+														value={p.length}
+														onChange={(v) => updatePipe(i, "length", v)}
+													/>
+												</td>
+
+												{/* Diameter Column */}
+												<td className="p-2">
+													<EditableCell
+														value={p.diameter}
+														onChange={(v) => updatePipe(i, "diameter", v)}
+													/>
+												</td>
+
+												{/* Roughness Column (Orange Tint) */}
+												<td className="p-2 bg-orange-50/30">
+													<EditableCell
+														value={p.roughness}
+														onChange={(v) => updatePipe(i, "roughness", v)}
+													/>
+												</td>
+											</tr>
+										))}
+									</tbody>
+								</table>
+							</div>
+
+							{/* NODES TABLE */}
+							<h3 className="text-sm font-bold text-gray-700 uppercase mb-2">Node Demands</h3>
+							<div className="overflow-auto max-h-60 mb-6 border rounded-lg shadow-sm">
+								<table className="w-full text-sm text-left border-collapse">
+									<thead className="bg-gray-100 text-gray-600 uppercase text-xs sticky top-0 z-10">
+										<tr>
+											<th className="p-3 border-b">Node ID</th>
+											<th className="p-3 border-b text-right">Demand (m³/s)</th>
+										</tr>
+									</thead>
+									<tbody className="bg-white">
+										{nodes.map((n, i) => (
+											<tr
+												key={i}
+												className="border-b hover:bg-gray-50"
+											>
+												<td className="p-3 font-bold text-gray-700">{n.id}</td>
+												<td className="p-3">
+													<div className="flex items-center justify-end gap-2">
+														<span className="text-xs text-gray-400">
+															{n.demand > 0 ? "(Inflow +)" : n.demand < 0 ? "(Outflow -)" : ""}
+														</span>
+														<div className="w-24">
+															<EditableCell
+																value={n.demand}
+																onChange={(v) => updateNode(i, "demand", v)}
+															/>
+														</div>
+													</div>
+												</td>
+											</tr>
+										))}
+									</tbody>
+								</table>
+							</div>
+
+							<button
+								onClick={handleSolveAndExplain}
+								disabled={loading}
+								className="w-full bg-blue-600 text-white text-lg font-bold py-4 rounded-xl shadow-lg hover:bg-blue-700 transition disabled:opacity-70 disabled:cursor-not-allowed"
+							>
+								{loading ? (
+									<span className="flex items-center justify-center gap-2">
+										<span className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin"></span>
+										{status}
+									</span>
+								) : (
+									"Confirm Data & Solve →"
+								)}
+							</button>
+						</div>
+					</div>
+				)}
+
+				{/* STEP 3: RESULTS */}
+				{step === 3 && solution && (
+					<div className="space-y-8 animate-fade-in-up">
+						{/* Top Row: Split View */}
+						<div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+							{/* Image */}
+							<div className="bg-white p-4 rounded-xl shadow-lg border">
+								<h3 className="font-bold text-gray-400 mb-2 uppercase text-xs tracking-wider">Reference Diagram</h3>
+								<div className="flex items-center justify-center bg-gray-100 rounded-lg h-[400px] overflow-hidden">
+									{image && (
+										<img
+											src={image}
+											alt="Network"
+											className="max-w-full max-h-full object-contain"
+										/>
+									)}
+								</div>
+							</div>
+
+							{/* Final Answer Table */}
+							<div className="bg-white p-6 rounded-xl shadow-lg border flex flex-col">
+								<h3 className="text-xl font-bold text-green-700 mb-2 flex items-center gap-2">✅ Final Calculation Results</h3>
+								<p className="text-sm text-gray-500 mb-4">
+									{solution.converged
+										? `Converged in ${solution.iterations} iteration(s)`
+										: `⚠️ Did not converge after ${solution.iterations} iterations`}
+								</p>
+								<div className="overflow-x-auto flex-grow">
+									<table className="w-full text-left text-sm border-collapse">
+										<thead>
+											<tr className="bg-green-50 text-green-900 text-xs uppercase tracking-wider border-b-2 border-green-200">
+												<th className="p-3">Pipe ID</th>
+												<th className="p-3 text-right">Flow (Q)</th>
+												<th className="p-3 text-center">Direction</th>
+												<th className="p-3 text-right">Velocity</th>
+												<th className="p-3 text-right">Head Loss</th>
+											</tr>
+										</thead>
+										<tbody className="text-gray-700">
+											{solution.results?.map((r: any, idx: number) => (
+												<tr
+													key={r.pipe_id}
+													className={idx % 2 === 0 ? "bg-white" : "bg-gray-50"}
+												>
+													<td className="p-3 font-bold border-b">{r.pipe_id}</td>
+													<td className="p-3 text-right font-mono font-medium border-b">
+														{Math.abs(r.flow).toFixed(5)} m³/s
+													</td>
+													<td className="p-3 text-center border-b">
+														<span
+															className={`px-2 py-1 rounded text-xs font-medium ${
+																r.flow >= 0 ? "bg-blue-100 text-blue-800" : "bg-orange-100 text-orange-800"
+															}`}
+														>
+															{r.flow >= 0 ? "→" : "←"}
+														</span>
+													</td>
+													<td className="p-3 text-right border-b">{r.velocity} m/s</td>
+													<td className="p-3 text-right border-b">{r.head_loss} m</td>
+												</tr>
+											))}
+										</tbody>
+									</table>
+								</div>
+							</div>
+						</div>
+
+						{/* Bottom Row: AI Explanation */}
+						<div className="bg-white p-8 rounded-xl shadow-lg border min-h-[300px]">
+							<h2 className="text-2xl font-bold text-gray-800 mb-6 flex justify-between border-b pb-4">
+								<span>Detailed Solution</span>
+								{loading && <span className="text-sm font-normal text-blue-600 animate-pulse">AI is writing...</span>}
+							</h2>
+							<div className="prose prose-slate max-w-none prose-headings:text-blue-800 prose-table:border prose-th:bg-gray-100 prose-th:p-3 prose-td:p-3">
+								<ReactMarkdown remarkPlugins={[remarkGfm]}>{explanation}</ReactMarkdown>
+							</div>
+						</div>
+					</div>
+				)}
+			</div>
+		</div>
+	);
 }
