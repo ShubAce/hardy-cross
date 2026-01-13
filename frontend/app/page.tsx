@@ -1,5 +1,5 @@
 "use client";
-import { useState, useRef } from "react";
+import { useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
@@ -28,10 +28,6 @@ const EditableCell = ({
 
 export default function Home() {
 	const [image, setImage] = useState<string | null>(null);
-	const videoRef = useRef<HTMLVideoElement>(null);
-	const canvasRef = useRef<HTMLCanvasElement>(null);
-	const [showCamera, setShowCamera] = useState(false);
-	const [stream, setStream] = useState<MediaStream | null>(null);
 
 	// State for Editable Data
 	const [nodes, setNodes] = useState<any[]>([]);
@@ -68,7 +64,7 @@ export default function Home() {
 		setLoading(false);
 	};
 
-	// 1. Upload & Vision
+	// Upload & Vision
 	const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
 		const file = e.target.files?.[0];
 		if (!file) return;
@@ -79,49 +75,6 @@ export default function Home() {
 			await processImage(base64);
 		};
 		reader.readAsDataURL(file);
-	};
-
-	// Camera functions
-	const startCamera = async () => {
-		try {
-			const mediaStream = await navigator.mediaDevices.getUserMedia({
-				video: { facingMode: "environment" },
-			});
-			setStream(mediaStream);
-			setShowCamera(true);
-			setTimeout(() => {
-				if (videoRef.current) {
-					videoRef.current.srcObject = mediaStream;
-				}
-			}, 100);
-		} catch (err: any) {
-			setErrorMsg("Camera access denied. Please allow camera permissions.");
-		}
-	};
-
-	const stopCamera = () => {
-		if (stream) {
-			stream.getTracks().forEach((track) => track.stop());
-			setStream(null);
-		}
-		setShowCamera(false);
-	};
-
-	const captureImage = async () => {
-		if (!videoRef.current || !canvasRef.current) return;
-
-		const video = videoRef.current;
-		const canvas = canvasRef.current;
-		canvas.width = video.videoWidth;
-		canvas.height = video.videoHeight;
-
-		const ctx = canvas.getContext("2d");
-		if (ctx) {
-			ctx.drawImage(video, 0, 0);
-			const base64 = canvas.toDataURL("image/jpeg", 0.9);
-			stopCamera();
-			await processImage(base64);
-		}
 	};
 
 	// 2. Solve & Stream
@@ -225,63 +178,36 @@ export default function Home() {
 				{/* STEP 1: UPLOAD */}
 				{step === 1 && (
 					<div className="max-w-xl mx-auto mt-10">
-						{!showCamera ? (
-							<div className="border-4 border-dashed border-gray-300 rounded-2xl p-16 text-center bg-white hover:border-blue-400 transition shadow-sm">
-								<div className="text-6xl mb-4">📐</div>
-								<h3 className="text-xl font-bold text-gray-700 mb-2">Upload Network Diagram</h3>
-								<p className="text-gray-400 mb-6">Supports PNG, JPG schematics</p>
-								<div className="flex flex-col sm:flex-row gap-4 justify-center">
-									<label className="bg-blue-600 text-white px-8 py-3 rounded-full font-bold shadow-lg hover:bg-blue-700 cursor-pointer inline-flex items-center gap-2 transition">
-										<span>📁</span> Select Image
-										<input
-											type="file"
-											onChange={handleUpload}
-											accept="image/*"
-											className="hidden"
-										/>
-									</label>
-									<button
-										onClick={startCamera}
-										className="bg-green-600 text-white px-8 py-3 rounded-full font-bold shadow-lg hover:bg-green-700 inline-flex items-center gap-2 transition"
-									>
-										<span>📷</span> Use Camera
-									</button>
-								</div>
-								{loading && <p className="mt-6 text-blue-600 animate-pulse font-medium">{status}</p>}
-							</div>
-						) : (
-							<div className="border-4 border-green-400 rounded-2xl p-6 text-center bg-white shadow-lg">
-								<h3 className="text-xl font-bold text-gray-700 mb-4">📷 Camera Preview</h3>
-								<div className="relative rounded-lg overflow-hidden bg-black mb-4">
-									<video
-										ref={videoRef}
-										autoPlay
-										playsInline
-										muted
-										className="w-full max-h-[400px] object-contain"
+						<div className="border-4 border-dashed border-gray-300 rounded-2xl p-8 sm:p-16 text-center bg-white hover:border-blue-400 transition shadow-sm">
+							<div className="text-6xl mb-4">📐</div>
+							<h3 className="text-xl font-bold text-gray-700 mb-2">Upload Network Diagram</h3>
+							<p className="text-gray-400 mb-6">Supports PNG, JPG schematics</p>
+							<div className="flex flex-col gap-3 sm:flex-row sm:gap-4 justify-center items-center">
+								{/* File picker - works on all devices */}
+								<label className="w-full sm:w-auto bg-blue-600 text-white px-8 py-3 rounded-full font-bold shadow-lg hover:bg-blue-700 cursor-pointer inline-flex items-center justify-center gap-2 transition">
+									<span>📁</span> Select Image
+									<input
+										type="file"
+										onChange={handleUpload}
+										accept="image/*"
+										className="hidden"
 									/>
-								</div>
-								<canvas
-									ref={canvasRef}
-									className="hidden"
-								/>
-								<div className="flex gap-4 justify-center">
-									<button
-										onClick={captureImage}
-										className="bg-green-600 text-white px-8 py-3 rounded-full font-bold shadow-lg hover:bg-green-700 inline-flex items-center gap-2 transition"
-									>
-										<span>📸</span> Capture
-									</button>
-									<button
-										onClick={stopCamera}
-										className="bg-gray-500 text-white px-8 py-3 rounded-full font-bold shadow-lg hover:bg-gray-600 transition"
-									>
-										Cancel
-									</button>
-								</div>
-								{loading && <p className="mt-4 text-blue-600 animate-pulse font-medium">{status}</p>}
+								</label>
+
+								{/* Direct camera capture - opens native camera on mobile */}
+								<label className="w-full sm:w-auto bg-green-600 text-white px-8 py-3 rounded-full font-bold shadow-lg hover:bg-green-700 cursor-pointer inline-flex items-center justify-center gap-2 transition">
+									<span>📷</span> Take Photo
+									<input
+										type="file"
+										onChange={handleUpload}
+										accept="image/*"
+										capture="environment"
+										className="hidden"
+									/>
+								</label>
 							</div>
-						)}
+							{loading && <p className="mt-6 text-blue-600 animate-pulse font-medium">{status}</p>}
+						</div>
 					</div>
 				)}
 
