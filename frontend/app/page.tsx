@@ -32,6 +32,7 @@ export default function Home() {
 	const [image, setImage] = useState<string | null>(null);
 
 	// State for Editable Data
+	const [networkData, setNetworkData] = useState<any>(null); // To store method type
 	const [nodes, setNodes] = useState<any[]>([]);
 	const [pipes, setPipes] = useState<any[]>([]);
 
@@ -57,6 +58,7 @@ export default function Home() {
 			const data = await res.json();
 			if (!res.ok) throw new Error(data.error);
 
+			setNetworkData({ method: data.method });
 			setNodes(data.nodes || []);
 			setPipes(data.pipes || []);
 			setStep(2);
@@ -85,7 +87,11 @@ export default function Home() {
 		setErrorMsg(null);
 		setExplanation("");
 
-		const payload = { nodes, pipes };
+		const payload = {
+			method: networkData?.method || "darcy",
+			nodes,
+			pipes,
+		};
 
 		try {
 			setStatus("Checking Physics & Solving...");
@@ -134,9 +140,10 @@ export default function Home() {
 		// If updating 'start' or 'end' nodes, keep as string. Otherwise parse float.
 		if (field === "start_node" || field === "end_node" || field === "id") {
 			newPipes[idx][field] = val;
-		} else if (field === "resistance_k") {
-			// K can be empty (will be calculated) or a number
-			newPipes[idx][field] = val === "" ? null : parseFloat(val) || null;
+		} else if (field === "resistance_k" || field === "given_flow" || field === "given_head_loss") {
+			// K and puzzle values can be empty/null
+			newPipes[idx][field] = val === "" ? null : parseFloat(val);
+			// Note: parseFloat("") is NaN, so check for empty string explicitly
 		} else {
 			newPipes[idx][field] = parseFloat(val) || 0;
 		}
@@ -145,7 +152,12 @@ export default function Home() {
 
 	const updateNode = (idx: number, field: string, val: string) => {
 		const newNodes = [...nodes];
-		newNodes[idx][field] = field === "id" ? val : parseFloat(val) || 0;
+		if (field === "id") {
+			newNodes[idx][field] = val;
+		} else {
+			// Allow null/empty for puzzle mode
+			newNodes[idx][field] = val === "" ? null : parseFloat(val);
+		}
 		setNodes(newNodes);
 	};
 
@@ -164,6 +176,7 @@ export default function Home() {
 								setStep(1);
 								setImage(null);
 								setExplanation("");
+								setNetworkData(null);
 							}}
 							className="bg-gray-200 px-4 py-2 rounded hover:bg-gray-300 text-sm text-gray-700 font-medium"
 						>
@@ -237,10 +250,14 @@ export default function Home() {
 								<strong>Start → End</strong> direction shown below.
 							</p>
 
-							{/* PIPES TABLE - FIXED HEADERS & WIDTHS */}
+							{/* PIPES TABLE - DYNAMIC HEADERS & WIDTHS */}
 							<h3 className="text-sm font-bold text-gray-700 uppercase mb-2 flex items-center gap-2">
 								<span>Pipe Properties</span>
-								<span className="text-xs font-normal text-gray-400 normal-case">(K auto-calculated from f if not provided)</span>
+								<span className="text-xs font-normal text-gray-400 normal-case">
+									{networkData?.method === "puzzle"
+										? "(Enter known values, leave unknowns empty)"
+										: "(Enter K/r directly if known, or L/D/f to calculate)"}
+								</span>
 							</h3>
 							<div className="overflow-auto max-h-80 mb-8 border rounded-lg shadow-sm bg-white">
 								<table className="w-full text-sm text-left border-collapse">
@@ -249,10 +266,20 @@ export default function Home() {
 											<th className="p-3 border-b">ID</th>
 											<th className="p-3 border-b text-center">Start</th>
 											<th className="p-3 border-b text-center">End</th>
-											<th className="p-3 border-b text-right bg-blue-50 text-blue-800">Length (m)</th>
-											<th className="p-3 border-b text-right">Diam (m)</th>
-											<th className="p-3 border-b text-right bg-orange-50 text-orange-800">f (friction)</th>
-											<th className="p-3 border-b text-right bg-purple-50 text-purple-800">K or R</th>
+
+											{networkData?.method === "puzzle" ? (
+												<>
+													<th className="p-3 border-b text-right bg-green-50 text-green-800">Given Flow (Q)</th>
+													<th className="p-3 border-b text-right bg-purple-50 text-purple-800">Given HL (hf)</th>
+												</>
+											) : (
+												<>
+													<th className="p-3 border-b text-right bg-blue-50 text-blue-800">Length (m)</th>
+													<th className="p-3 border-b text-right">Diam (m)</th>
+													<th className="p-3 border-b text-right bg-orange-50 text-orange-800">f (friction)</th>
+													<th className="p-3 border-b text-right bg-purple-50 text-purple-800">Resistance (K or r)</th>
+												</>
+											)}
 										</tr>
 									</thead>
 									<tbody className="bg-white">
@@ -283,48 +310,75 @@ export default function Home() {
 													/>
 												</td>
 
-												{/* Length Column (Blue Tint) - default to 1 if not provided */}
-												<td className="p-2 bg-blue-50/30">
-													<EditableCell
-														value={p.length === 0 || p.length === null || p.length === undefined ? 1 : p.length}
-														onChange={(v) => updatePipe(i, "length", v)}
-													/>
-												</td>
+												{networkData?.method === "puzzle" ? (
+													<>
+														<td className="p-2 bg-green-50/30">
+															<EditableCell
+																value={p.given_flow ?? ""}
+																placeholder="?"
+																onChange={(v) => updatePipe(i, "given_flow", v)}
+															/>
+														</td>
+														<td className="p-2 bg-purple-50/30">
+															<EditableCell
+																value={p.given_head_loss ?? ""}
+																placeholder="?"
+																onChange={(v) => updatePipe(i, "given_head_loss", v)}
+															/>
+														</td>
+													</>
+												) : (
+													<>
+														{/* Length Column (Blue Tint) - default to 1 if not provided */}
+														<td className="p-2 bg-blue-50/30">
+															<EditableCell
+																value={p.length === 0 || p.length === null || p.length === undefined ? 1 : p.length}
+																onChange={(v) => updatePipe(i, "length", v)}
+															/>
+														</td>
 
-												{/* Diameter Column - default to 1 if not provided */}
-												<td className="p-2">
-													<EditableCell
-														value={p.diameter === 0 || p.diameter === null || p.diameter === undefined ? 1 : p.diameter}
-														onChange={(v) => updatePipe(i, "diameter", v)}
-													/>
-												</td>
+														{/* Diameter Column - default to 1 if not provided */}
+														<td className="p-2">
+															<EditableCell
+																value={
+																	p.diameter === 0 || p.diameter === null || p.diameter === undefined
+																		? 1
+																		: p.diameter
+																}
+																onChange={(v) => updatePipe(i, "diameter", v)}
+															/>
+														</td>
 
-												{/* Roughness Column (Orange Tint) */}
-												<td className="p-2 bg-orange-50/30">
-													<EditableCell
-														value={p.roughness}
-														onChange={(v) => updatePipe(i, "roughness", v)}
-														placeholder="0.02"
-													/>
-												</td>
+														{/* Roughness Column (Orange Tint) */}
+														<td className="p-2 bg-orange-50/10">
+															<EditableCell
+																value={p.roughness}
+																onChange={(v) => updatePipe(i, "roughness", v)}
+																placeholder="0.02"
+															/>
+														</td>
 
-												{/* K/R Column (Purple Tint) - Direct resistance coefficient */}
-												<td className="p-2 bg-purple-50/30">
-													<EditableCell
-														value={p.resistance_k ?? ""}
-														onChange={(v) => updatePipe(i, "resistance_k", v)}
-														placeholder="auto"
-													/>
-												</td>
+														{/* K/R Column (Purple Tint) - Direct resistance coefficient */}
+														<td className="p-2 bg-purple-50/10">
+															<EditableCell
+																value={p.resistance_k ?? ""}
+																onChange={(v) => updatePipe(i, "resistance_k", v)}
+																placeholder="auto"
+															/>
+														</td>
+													</>
+												)}
 											</tr>
 										))}
 									</tbody>
 								</table>
 							</div>
-							<p className="text-xs text-gray-500 mb-4 bg-purple-50 p-2 rounded border border-purple-200">
-								<strong>💡 K/R:</strong> If given directly in the image, enter it. Otherwise leave as "auto" and it will be calculated
-								from: K = 8fL / (π²gD⁵)
-							</p>
+							{networkData?.method !== "puzzle" && (
+								<p className="text-xs text-gray-500 mb-4 bg-purple-50 p-2 rounded border border-purple-200">
+									<strong>💡 Type 1 vs Type 2:</strong> Enter <strong>Resistance (K/r)</strong> directly if given (Type 2).
+									Otherwise, enter Length/Diameter/Friction (Type 1) and K will be calculated automatically.
+								</p>
+							)}
 
 							{/* NODES TABLE */}
 							<h3 className="text-sm font-bold text-gray-700 uppercase mb-2">Node Demands</h3>
@@ -350,7 +404,8 @@ export default function Home() {
 														</span>
 														<div className="w-24">
 															<EditableCell
-																value={n.demand}
+																value={n.demand ?? ""}
+																placeholder={networkData?.method === "puzzle" ? "?" : "0"}
 																onChange={(v) => updateNode(i, "demand", v)}
 															/>
 														</div>
@@ -417,9 +472,13 @@ export default function Home() {
 										<thead>
 											<tr className="bg-green-50 text-green-900 text-xs uppercase tracking-wider border-b-2 border-green-200">
 												<th className="p-3">Pipe</th>
-												<th className="p-3 text-right bg-purple-50 text-purple-800">K (s²/m⁵)</th>
+												<th className="p-3 text-center">Start Node</th>
+												<th className="p-3 text-center">End Node</th>
+												{networkData?.method !== "puzzle" && (
+													<th className="p-3 text-right bg-purple-50 text-purple-800">K (s²/m⁵)</th>
+												)}
 												<th className="p-3 text-right">Flow Q (m³/s)</th>
-												<th className="p-3 text-right">Velocity</th>
+												{networkData?.method !== "puzzle" && <th className="p-3 text-right">Velocity</th>}
 												<th className="p-3 text-right">Head Loss</th>
 											</tr>
 										</thead>
@@ -430,27 +489,73 @@ export default function Home() {
 													className={idx % 2 === 0 ? "bg-white" : "bg-gray-50"}
 												>
 													<td className="p-3 font-bold border-b">{r.pipe_id}</td>
-													<td className="p-3 text-right font-mono border-b bg-purple-50/30">
-														<span className="font-medium">{r.K}</span>
-														<span className="text-xs text-gray-400 ml-1">
-															({r.K_source === "provided" ? "given" : "calc"})
-														</span>
-													</td>
+													<td className="p-3 text-center border-b">{r.start_node}</td>
+													<td className="p-3 text-center border-b">{r.end_node}</td>
+													{networkData?.method !== "puzzle" && (
+														<td className="p-3 text-right font-mono border-b bg-purple-50/30">
+															<span className="font-medium">{r.K}</span>
+															<span className="text-xs text-gray-400 ml-1">
+																({r.K_source === "provided" ? "given" : "calc"})
+															</span>
+														</td>
+													)}
 													<td
 														className={`p-3 text-right font-mono font-medium border-b ${
 															r.flow >= 0 ? "text-blue-700" : "text-orange-700"
 														}`}
 													>
 														{r.flow >= 0 ? "+" : ""}
-														{r.flow.toFixed(5)}
+														{Number(r.flow).toFixed(5)}
 													</td>
-													<td className="p-3 text-right border-b">{r.velocity} m/s</td>
-													<td className="p-3 text-right border-b">{r.head_loss} m</td>
+													{networkData?.method !== "puzzle" && (
+														<td className="p-3 text-right border-b">{r.velocity} m/s</td>
+													)}
+													<td className="p-3 text-right border-b">{Number(r.head_loss).toFixed(5)} m</td>
 												</tr>
 											))}
 										</tbody>
 									</table>
 								</div>
+
+								{/* Node Results (Puzzle Only) */}
+								{networkData?.method === "puzzle" && solution.node_results && (
+									<div className="mt-6 border-t pt-6">
+										<h3 className="text-lg font-bold text-blue-800 mb-3 block">Solved Node Demands</h3>
+										<div className="overflow-x-auto border rounded-lg">
+											<table className="w-full text-left text-sm border-collapse">
+												<thead>
+													<tr className="bg-blue-50 text-blue-900 text-xs uppercase tracking-wider border-b-2 border-blue-200">
+														<th className="p-3">Node</th>
+														<th className="p-3 text-right">Net Discharge (m³/s)</th>
+														<th className="p-3 text-right">Status</th>
+													</tr>
+												</thead>
+												<tbody className="text-gray-700">
+													{solution.node_results.map((n: any) => (
+														<tr
+															key={n.node_id}
+															className="border-b bg-white"
+														>
+															<td className="p-3 font-bold">{n.node_id}</td>
+															<td className="p-3 text-right font-mono text-blue-700 font-bold">
+																{n.demand !== null ? Number(n.demand).toFixed(2) : "?"}
+															</td>
+															<td className="p-3 text-right">
+																{n.is_solved ? (
+																	<span className="text-xs bg-green-100 text-green-800 px-2 py-1 rounded-full font-bold">
+																		FOUND
+																	</span>
+																) : (
+																	<span className="text-xs text-gray-400">Given</span>
+																)}
+															</td>
+														</tr>
+													))}
+												</tbody>
+											</table>
+										</div>
+									</div>
+								)}
 							</div>
 						</div>
 

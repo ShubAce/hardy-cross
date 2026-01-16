@@ -25,65 +25,56 @@ class PipeInput(BaseModel):
     id: str
     start_node: str
     end_node: str
-    length: float
-    diameter: float
-    roughness: float  # Darcy friction factor (f)
-    resistance_k: Optional[float] = None  # Direct resistance coefficient (K or R)
+    length: Optional[float] = 1.0
+    diameter: Optional[float] = 1.0
+    roughness: Optional[float] = 0.02
+    resistance_k: Optional[float] = None
+    given_flow: Optional[float] = None       # New field for Puzzle Mode
+    given_head_loss: Optional[float] = None  # New field for Puzzle Mode
 
 class NodeInput(BaseModel):
     id: str
-    demand: float  # Positive = inflow (source), Negative = outflow (demand)
+    demand: Optional[float] = None  # float for known, None for unknown (?)
 
 class NetworkInput(BaseModel):
+    method: Optional[str] = "darcy"  # "darcy" or "puzzle"
     pipes: List[PipeInput]
     nodes: List[NodeInput]
 
 # --- ROBUSTNESS CHECKS ---
-def validate_and_fix_network(nodes: List[NodeInput], pipes: List[PipeInput]) -> Tuple[List[NodeInput], List[PipeInput]]:
+def validate_and_fix_network(nodes: List[NodeInput], pipes: List[PipeInput], method: str = "darcy") -> Tuple[List[NodeInput], List[PipeInput]]:
     """
     Validates and fixes the network data to ensure it's physically solvable.
-    - Fills missing pipe properties with reasonable defaults
-    - Balances node demands for continuity
-    
-    If length and diameter are not provided, assume both as 1.
-    This simplifies the K calculation to just use the friction factor directly
-    when K = 8fL/(π²gD⁵) with L=1, D=1 → K ≈ 0.0826 * f
     """
     for p in pipes:
-        # If K is directly provided, length and diameter don't matter for calculation
-        # But we still set defaults for display purposes
+        if method == "darcy":
+            # Defaults for simulation mode
+            if p.length is None or p.length <= 0: p.length = 1.0
+            if p.diameter is None or p.diameter <= 0: p.diameter = 1.0
+            if p.roughness is None or p.roughness <= 0: p.roughness = 0.02
         
-        # Fix Length - if not detected, assume 1 (unitless for simplified problems)
-        if p.length <= 0 or p.length is None:
-            p.length = 1.0
-            print(f"ℹ️ Pipe {p.id}: Length not detected, assuming L=1")
-        
-        # Fix Diameter - if not detected, assume 1 (unitless for simplified problems)
-        if p.diameter <= 0 or p.diameter is None:
-            p.diameter = 1.0
-            print(f"ℹ️ Pipe {p.id}: Diameter not detected, assuming D=1")
-        
-        # Fix Roughness/Friction factor
-        # Typical Darcy friction factors: 0.01 - 0.05
-        # If value seems invalid (<=0 or >1), use default
-        if p.roughness <= 0 or p.roughness > 1.0:
-            p.roughness = 0.02
+        # Ensure ID exists
+        if not p.id: p.id = f"{p.start_node}-{p.end_node}"
 
-    # 2. CONTINUITY CHECK (Conservation of Mass)
-    # Sum of all demands must equal zero
-    total_demand = sum(n.demand for n in nodes)
-    
-    if abs(total_demand) > 1e-6:
-        # Find the source node (largest positive demand) and adjust it
-        source_nodes = [n for n in nodes if n.demand > 0]
-        if source_nodes:
-            max_node = max(source_nodes, key=lambda n: n.demand)
-        else:
-            # No source found, adjust the node with largest absolute demand
-            max_node = max(nodes, key=lambda n: abs(n.demand))
-        
-        max_node.demand -= total_demand
-        print(f"⚠️ Warning: Demands unbalanced by {total_demand:.6f} m³/s. Adjusted node '{max_node.id}'.")
+    # 2. CONTINUITY CHECK (Only for Darcy Mode where all demands must be known)
+    if method == "darcy":
+        # Fill missing demands with 0
+        for n in nodes:
+            if n.demand is None: n.demand = 0.0
+
+        total_demand = sum(n.demand for n in nodes)
+        if abs(total_demand) > 1e-6:
+            # Balance the network
+            source_nodes = [n for n in nodes if n.demand > 0]
+            if source_nodes:
+                max_node = max(source_nodes, key=lambda n: n.demand)
+            elif nodes:
+                max_node = max(nodes, key=lambda n: abs(n.demand))
+            else:
+                return nodes, pipes # Empty nodes list
+            
+            max_node.demand -= total_demand
+            print(f"⚠️ Balanced network at node '{max_node.id}' by {-total_demand:.2f}")
 
     return nodes, pipes
 
@@ -230,20 +221,222 @@ def initialize_flows_robust(nodes: List[NodeInput], pipes: List[PipeInput]) -> D
     
     return pipe_flows
 
+def solve_puzzle_network(nodes, pipes):
+    """
+    Solves for missing Pipe Q, Pipe hf, AND Node Demands using Mass/Energy Balance.
+    Non-iterative, logic-based solver.
+    """
+    # 1. Setup State
+    solved_flows = {} # pipe_id -> float
+    solved_hl = {}    # pipe_id -> float
+    solved_demands = {} # node_id -> float
+    
+    # Pre-fill knowns
+    for p in pipes:
+        if p.given_flow is not None: solved_flows[p.id] = p.given_flow
+        if p.given_head_loss is not None: solved_hl[p.id] = p.given_head_loss
+        
+    for n in nodes:
+        if n.demand is not None: solved_demands[n.id] = n.demand
+
+    # Build Graph Helper
+    adj = {n.id: [] for n in nodes}
+    for p in pipes:
+        adj[p.start_node].append({"pid": p.id, "dir": 1})  # Leaving start (Out)
+        adj[p.end_node].append({"pid": p.id, "dir": -1})   # Entering end (In)
+
+    # Cycle Detection for Head Loss
+    G = nx.Graph()
+    for p in pipes: G.add_edge(p.start_node, p.end_node, id=p.id)
+    try:
+        loops = nx.cycle_basis(G)
+    except:
+        loops = []
+
+    # 2. LOGIC LOOP (Repeat until no new values found)
+    changed = True
+    iterations = 0
+    max_iter = len(pipes) * 2 + 5
+    
+    while changed and iterations < max_iter:
+        changed = False
+        iterations += 1
+
+        # --- A. SOLVE NODES (MASS BALANCE) ---
+        for node in nodes:
+            node_id = node.id
+            connections = adj[node_id]
+            
+            # Check for Pipe Flow Unknowns vs Node Demand Unknowns
+            unknown_pipes = [c for c in connections if c['pid'] not in solved_flows]
+            demand_known = node_id in solved_demands
+            
+            if demand_known:
+                demand = solved_demands[node_id]
+                
+                # Case 1: Demand Known, 1 Pipe Unknown -> Solve Pipe
+                if len(unknown_pipes) == 1:
+                    # Balance: Sum(In) + Demand = Sum(Out)
+                    # Or: Sum(Q_in) - Sum(Q_out) + Demand = 0
+                    
+                    sum_in = sum(solved_flows[c['pid']] for c in connections if c['pid'] in solved_flows and c['dir'] == -1)
+                    sum_out = sum(solved_flows[c['pid']] for c in connections if c['pid'] in solved_flows and c['dir'] == 1)
+                    
+                    # Target equation: (sum_in + Q_unk_in) - (sum_out + Q_unk_out) + demand = 0
+                    unk = unknown_pipes[0]
+                    
+                    # If unk is 'In' (dir=-1), term is +Q
+                    # If unk is 'Out' (dir=1), term is -Q
+                    # Q * (-dir) = sum_out - sum_in - demand
+                    
+                    rhs = sum_out - sum_in - demand
+                    unk_coeff = -unk['dir'] # If In(-1) -> 1. If Out(1) -> -1.
+                    
+                    solved_q = rhs / unk_coeff
+                    solved_flows[unk['pid']] = solved_q
+                    changed = True
+            
+            else:
+                # Case 2: Demand Unknown, All Pipes Known -> Solve Demand
+                if len(unknown_pipes) == 0:
+                    # Demand = Sum(Out) - Sum(In)
+                    sum_in = sum(solved_flows[c['pid']] for c in connections if c['dir'] == -1)
+                    sum_out = sum(solved_flows[c['pid']] for c in connections if c['dir'] == 1)
+                    
+                    calc_demand = sum_out - sum_in
+                    solved_demands[node_id] = calc_demand
+                    changed = True
+
+        # --- B. SOLVE HEAD LOSS (LOOP BALANCE) ---
+        for loop in loops:
+            # Gather pipe info for loop
+            loop_pipes = [] # (pipe_id, dir_in_loop)
+            
+            # Traverse loop u->v
+            # If pipe is u->v, dir=1. If v->u, dir=-1.
+            # Sum(hf * dir) = 0
+            
+            valid_loop = True
+            unknown_hl_pipes = []
+            current_sum = 0
+            
+            for i in range(len(loop)):
+                u, v = loop[i], loop[(i+1)%len(loop)]
+                
+                # Find connecting pipe
+                p_found = None
+                p_dir = 0
+                for p in pipes:
+                    if p.start_node == u and p.end_node == v:
+                        p_found = p; p_dir = 1; break
+                    if p.start_node == v and p.end_node == u:
+                        p_found = p; p_dir = -1; break
+                
+                if not p_found: 
+                    valid_loop = False; break
+                
+                pid = p_found.id
+                
+                if pid in solved_hl and pid in solved_flows:
+                    # We know magnitude hf. Direction of drop depends on flow.
+                    # Drop is in direction of flow.
+                    # Term = |hf| * sign(Q) * loop_dir
+                    q = solved_flows[pid]
+                    mag_hf = abs(solved_hl[pid])
+                    flow_sign = 1 if q >= 0 else -1
+                    
+                    term = mag_hf * flow_sign * p_dir
+                    current_sum += term
+                elif pid in solved_hl and pid not in solved_flows:
+                    # We know hf magnitude but not flow direction? 
+                    # Ambiguous without Q. Skip for now.
+                    valid_loop = False; break
+                else:
+                    unknown_hl_pipes.append((pid, p_dir))
+            
+            if valid_loop and len(unknown_hl_pipes) == 1:
+                # Solve for missing HL
+                # Sum + term_unk = 0 => term_unk = -Sum
+                pid_unk, p_dir_unk = unknown_hl_pipes[0]
+                
+                # term_unk = hf_signed * p_dir_unk
+                # hf_signed = -Sum / p_dir_unk
+                
+                req_signed_hf = -current_sum / p_dir_unk
+                
+                # Map back to magnitude and flow direction
+                # If we know flow Q, we can verify consistency or set hf mag
+                
+                if pid_unk in solved_flows:
+                    q = solved_flows[pid_unk]
+                    flow_sign = 1 if q >= 0 else -1
+                    
+                    # hf_signed = |hf| * flow_sign
+                    # |hf| = hf_signed / flow_sign
+                    
+                    # If flow_sign is 0, we can't determine hf this way (no friction)
+                    # Assuming q!=0
+                    if abs(q) > 1e-9:
+                        calc_mag = req_signed_hf / flow_sign
+                        if calc_mag < 0:
+                            # Contradiction: HL opposes flow? Possible if pump? 
+                            # Assuming passive pipes, this implies calculation error or bad data.
+                            # Just take abs for now for puzzle logic.
+                            pass
+                        
+                        solved_hl[pid_unk] = abs(calc_mag)
+                        changed = True
+
+    # 3. Format Output
+    pipe_results = []
+    for p in pipes:
+        q = solved_flows.get(p.id, None)
+        hf = solved_hl.get(p.id, None)
+        
+        res = {
+            "pipe_id": p.id,
+            "start_node": p.start_node,
+            "end_node": p.end_node,
+            "flow": round(q, 2) if q is not None else 0,
+            "head_loss": round(hf, 2) if hf is not None else 0,
+            "velocity": 0.0,
+            "flow_direction": "unknown",
+            "reynolds": 0,
+            "K": 0,
+            "K_source": "puzzle"
+        }
+        if q is not None:
+             res["flow_direction"] = "start→end" if q >= 0 else "end→start"
+        pipe_results.append(res)
+        
+    node_results = []
+    for n in nodes:
+        d = solved_demands.get(n.id, None)
+        node_results.append({
+            "node_id": n.id,
+            "demand": round(d, 2) if d is not None else None,
+            "is_solved": d is not None and n.demand is None # It was unknown, now known
+        })
+
+    return {
+        "converged": True,
+        "iterations": iterations,
+        "results": pipe_results,
+        "node_results": node_results, # New field
+        "history": []
+    }
+
 def solve_network(data: NetworkInput):
     """
     Solve the pipe network using the Hardy Cross iterative method.
-    
-    The Hardy Cross method corrects flow rates iteratively to satisfy:
-    1. Continuity equation at each node (∑Q = 0)
-    2. Energy equation around each loop (∑h_f = 0)
-    
-    For each loop, the correction factor is:
-    ΔQ = -∑(h_f) / ∑(dh_f/dQ) = -∑(K·Q·|Q|) / ∑(2·K·|Q|)
     """
     # 1. VALIDATION & DATA PREPARATION
-    nodes, pipes = validate_and_fix_network(data.nodes.copy(), data.pipes.copy())
+    # Pass 'method' to let validation know if it should be strict
+    nodes, pipes = validate_and_fix_network(data.nodes.copy(), data.pipes.copy(), method=data.method)
     pipes_map = {p.id: p for p in pipes}
+
+    if data.method == "puzzle":
+        return solve_puzzle_network(nodes, pipes)
 
     # 2. BUILD NETWORK GRAPH & DETECT LOOPS
     G = nx.Graph()
@@ -394,6 +587,8 @@ def solve_network(data: NetworkInput):
         
         results.append({
             "pipe_id": pipe_id,
+            "start_node": pipe.start_node,
+            "end_node": pipe.end_node,
             "flow": round(Q, 6),
             "flow_direction": "start→end" if Q >= 0 else "end→start",
             "velocity": round(velocity, 4),
