@@ -22,7 +22,7 @@ const EditableCell = ({
 			type={type}
 			placeholder={placeholder}
 			className="w-full bg-blue-50 border-b border-blue-200 focus:border-blue-600 outline-none px-2 py-1 text-right font-mono text-sm text-gray-800 transition placeholder:text-gray-400 placeholder:text-xs"
-			value={value}
+			value={value ?? ""}
 			onChange={(e) => onChange(e.target.value)}
 		/>
 	);
