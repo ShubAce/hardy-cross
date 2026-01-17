@@ -1,5 +1,5 @@
 "use client";
-import { useState } from "react";
+import { useState, useRef } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -44,6 +44,7 @@ export default function Home() {
 	const [errorMsg, setErrorMsg] = useState<string | null>(null);
 	const [step, setStep] = useState(1);
 	const [activeTab, setActiveTab] = useState<"geometry" | "boundary" | "initial" | "final" | "history">("geometry");
+	const abortControllerRef = useRef<AbortController | null>(null);
 
 	// Process image (shared between upload and camera)
 	const processImages = async (base64Images: string[]) => {
@@ -163,6 +164,14 @@ export default function Home() {
 
 	// 2. Solve & Stream
 	const handleSolveAndExplain = async () => {
+		// Cancel any pending operations from previous runs
+		if (abortControllerRef.current) {
+			abortControllerRef.current.abort();
+		}
+		// Create new controller for this run
+		const controller = new AbortController();
+		abortControllerRef.current = controller;
+
 		setLoading(true);
 		setErrorMsg(null);
 		setExplanation("");
@@ -181,6 +190,7 @@ export default function Home() {
 				method: "POST",
 				headers: { "Content-Type": "application/json" },
 				body: JSON.stringify(payload),
+				signal: controller.signal,
 			});
 			const solveResult = await solveRes.json();
 			if (!solveRes.ok) throw new Error(solveResult.detail || "Solver failed");
@@ -194,6 +204,7 @@ export default function Home() {
 				method: "POST",
 				headers: { "Content-Type": "application/json" },
 				body: JSON.stringify({ networkData: payload, solution: solveResult }),
+				signal: controller.signal,
 			});
 
 			if (!response.ok || !response.body) throw new Error(response.statusText);
@@ -210,8 +221,12 @@ export default function Home() {
 			}
 			setStatus("Complete");
 		} catch (err: any) {
-			console.error(err);
-			setErrorMsg(err.message || "Process failed.");
+			if (err.name === "AbortError") {
+				console.log("Operation aborted by user request.");
+			} else {
+				console.error(err);
+				setErrorMsg(err.message || "Process failed.");
+			}
 		}
 		setLoading(false);
 	};
@@ -255,6 +270,9 @@ export default function Home() {
 					{step > 1 && (
 						<button
 							onClick={() => {
+								if (abortControllerRef.current) {
+									abortControllerRef.current.abort();
+								}
 								setStep(1);
 								setImages([]);
 								setExplanation("");
