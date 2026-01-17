@@ -44,6 +44,7 @@ export default function Home() {
 	const [errorMsg, setErrorMsg] = useState<string | null>(null);
 	const [step, setStep] = useState(1);
 	const [activeTab, setActiveTab] = useState<"geometry" | "boundary" | "initial" | "final" | "history">("geometry");
+	const [showDiagrams, setShowDiagrams] = useState(false);
 	const abortControllerRef = useRef<AbortController | null>(null);
 
 	// Process image (shared between upload and camera)
@@ -818,8 +819,28 @@ export default function Home() {
 						<div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
 							{/* Image */}
 							<div className="bg-white p-4 rounded-xl shadow-lg border">
-								<h3 className="font-bold text-gray-400 mb-2 uppercase text-xs tracking-wider">Reference Diagrams</h3>
-								<div className="grid grid-cols-2 gap-2 h-[400px] overflow-y-auto p-2 bg-gray-50 rounded-lg">
+								<div
+									className="flex justify-between items-center mb-2 cursor-pointer lg:cursor-default p-2 lg:p-0 hover:bg-gray-50 lg:hover:bg-white rounded transition"
+									onClick={() => setShowDiagrams(!showDiagrams)}
+								>
+									<h3 className="font-bold text-gray-400 uppercase text-xs tracking-wider">Reference Diagrams</h3>
+									<span className="text-blue-500 text-xs font-bold lg:hidden flex items-center gap-1">
+										{showDiagrams ? (
+											<>
+												Hide <span>▲</span>
+											</>
+										) : (
+											<>
+												Show <span>▼</span>
+											</>
+										)}
+									</span>
+								</div>
+								<div
+									className={`transition-all duration-300 ease-in-out gap-2 p-2 bg-gray-50 rounded-lg ${
+										showDiagrams ? "grid grid-cols-1 sm:grid-cols-2 h-96 overflow-y-auto" : "hidden"
+									} lg:grid lg:grid-cols-2 lg:h-96 lg:overflow-y-auto`}
+								>
 									{images.map((img, idx) => (
 										<img
 											key={idx}
