@@ -35,39 +35,67 @@ export async function POST(request: Request) {
 		return NextResponse.json({ error: "Missing GOOGLE_API_KEYS or GOOGLE_API_KEY in .env.local" }, { status: 500 });
 	}
 
-	const { image } = await request.json(); // Expects full base64 string (data:image/png;base64,...)
+	const reqBody = await request.json();
+	// Support both 'image' (legacy/single) and 'images' (new/multiple) fields
+	let imageList: string[] = [];
 
-	if (!image) {
-		return NextResponse.json({ error: "No image provided" }, { status: 400 });
+	if (reqBody.images && Array.isArray(reqBody.images)) {
+		imageList = reqBody.images;
+	} else if (reqBody.image) {
+		imageList = [reqBody.image];
 	}
 
-	// 2. Prepare Image for Gemini
-	const base64Data = image.split(",")[1]; // Remove header
-	const mimeType = image.split(";")[0].split(":")[1]; // Extract "image/png"
+	if (imageList.length === 0) {
+		return NextResponse.json({ error: "No images provided" }, { status: 400 });
+	}
+
+	// 2. Prepare Images for Gemini
+	const imageParts = imageList.map((img) => {
+		const base64Data = img.split(",")[1]; // Remove header
+		const mimeType = img.split(";")[0].split(":")[1]; // Extract "image/png"
+		return {
+			inlineData: {
+				data: base64Data,
+				mimeType: mimeType,
+			},
+		};
+	});
 
 	const prompt = `
-    Analyze this pipe network image. It describes a hydraulic network problem.
+    Analyze the provided pipe network image(s). They describe a hydraulic network problem.
+    Since there may be multiple images, combine the information from all of them to form a complete network.
+    - If images show different parts of the network, merge them based on common node names (A, B, C, etc.).
+    - If one image is a text table and another is a diagram, combine the data.
 
-    **Step 1: Detect Mode (Classification)**
-    Classify the problem into one of two MAIN categories:
+    **Step 1: Detect Problem Type (Classification)**
+    Classify the problem into one of these 4 Types:
 
-    **MODE A: "darcy" (Physics Simulation)**
-    - The goal is to FIND FLOWS ($Q$) based on pipe properties.
-    - **Type 1**: Pipes have derived properties like Length ($L$), Diameter ($D$), Friction ($f$).
-    - **Type 2**: Pipes have resistance values directly given as $r=\dots$ or $K=\dots$.
-    - *Key Indicators:* You see "L=100m" OR "r=2", "K=5". Nodes have demand values (inflows/outflows).
+    **TYPE 1: Flow/Head Identification (Puzzle)**
+    - *Goal:* Find missing Q or Head Loss values using simple logic (KCL/KVL) without full iteration.
+    - *Indicators:* Some flows/heads are given ($Q=10$, $h=5$), others are unknown ($?$).
+    - *Method:* "puzzle"
 
-    **MODE B: "puzzle" (Missing Values)**
-    - The goal is to FIND MISSING VALUES ($Q$ or $h_f$) based on given values.
-    - Specific flows or head losses are provided on some pipes (e.g., "$Q=20$", "$h_f=10$").
-    - Other values are marked with "?" or variables.
-    - *Key Indicator:* You see "$Q=?$" or "$h_f=?$" or mixed known/unknown flows.
+    **TYPE 2: Classic Hardy Cross (Resistance Given)**
+    - *Goal:* Solve network using given resistance factors ($r$ or $K$).
+    - *Indicators:* Pipes labeled with $r=2$, $K=4$, or similar. 
+    - *Method:* "darcy"
+
+    **TYPE 3: Verification (Suggested Flows Given)**
+    - *Goal:* Verify or correct a set of assumed/suggested discharges.
+    - *Indicators:* A table or list of "Assumed Flows" or "Suggested Discharges" is provided.
+    - *Method:* "darcy"
+
+    **TYPE 4: Physics-Based Simulation (L, D, f)**
+    - *Goal:* Compute flows from scratch using physical pipe properties.
+    - *Indicators:* Pipes defined by Length ($L$), Diameter ($D$), Friction ($f$). No initial flows given.
+    - *Method:* "darcy"
 
     **Step 2: Extract Data**
     Return ONLY a JSON object with this EXACT schema:
     {
       "method": "puzzle" | "darcy",
-      "nodes": [{"id": "string", "demand": number | null}], 
+      "problem_type": "TYPE_1" | "TYPE_2" | "TYPE_3" | "TYPE_4",
+      "nodes": [{"id": "string", "demand": number | null, "source": "image_1" | "image_N" | "default"}], 
       "pipes": [
         {
           "id": "string", 
@@ -78,26 +106,18 @@ export async function POST(request: Request) {
           "roughness": number | null, 
           "resistance_k": number | null,
           "given_flow": number | null,
-          "given_head_loss": number | null
+          "given_head_loss": number | null,
+          "source": "image_1" | "image_N" | "default"
         }
       ]
     }
     Rules:
-    - Demand: Positive (+) for Inflow (Source), Negative (-) for Outflow (Load). **If a node discharge is unknown (e.g. Q_B = ?), set demand to null.**
-    - length: Pipe length. Should be null if not explicitly given.
-    - diameter: Pipe diameter. Should be null if not explicitly given.
-    - roughness: Darcy friction factor 'f'. If unspecified, use 0.02.
-    - resistance_k: If the image provides K, R, or r (Type 2), map it here. If image uses L/D/f (Type 1), leave null.
-    
-    **Problem Types:**
-    1. **Type 1 (Darcy Simulation):** L, D, f are given. resistance_k is null.
-    2. **Type 2 (Darcy Simulation):** r or K values given. Map to resistance_k. L, D can be null.
-    3. **Puzzle Mode:** Q or hf given. Map to given_flow / given_head_loss. method="puzzle".
-      - Common formats: K=500, R=1000, r=200 (units are s²/m⁵ typically)
-    - given_flow / given_head_loss: ONLY for "puzzle" mode. Extract values if given (e.g. Q1=30 -> given_flow: 30). Leave null if unknown (Q=?).
-    - Units: Assume SI (meters) unless marked otherwise.
-    - If you see both f (friction factor) AND K (resistance), include both values.
-    - IMPORTANT: If length/diameter are not shown, default to 1 for simplified problem types.
+    - Connectivity: If schematic is text/table only (e.g. "Pipe AB"), infer Start=A, End=B.
+    - Demand: Positive (+) for Inflow (Source), Negative (-) for Outflow (Sink).
+    - Extract ALL visible data: If Type 2 problem shows Length/Diameter, extract them anyway.
+    - TYPE 3: Extract suggested Q values into \`given_flow\`.
+    - TYPE 4: Ensure L, D, f are extracted.
+    - NO COMMENTS in JSON. NO MARKDOWN. Return raw JSON only.
     `;
 
 	// Try each API key until one works
@@ -113,17 +133,15 @@ export async function POST(request: Request) {
 				generationConfig: { responseMimeType: "application/json" },
 			});
 
-			const result = await model.generateContent([
-				prompt,
-				{
-					inlineData: {
-						data: base64Data,
-						mimeType: mimeType,
-					},
-				},
-			]);
+			const result = await model.generateContent([prompt, ...imageParts]);
 
-			const responseText = result.response.text();
+			let responseText = result.response.text();
+			// Cleanup markdown and potential whitespace issues
+			responseText = responseText
+				.replace(/```json/g, "")
+				.replace(/```/g, "")
+				.trim();
+
 			console.log(`✅ Gemini Response (key ${i + 1}):`, responseText.substring(0, 100) + "...");
 
 			const data = JSON.parse(responseText);

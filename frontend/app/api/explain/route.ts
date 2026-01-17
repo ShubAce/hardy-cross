@@ -67,7 +67,21 @@ export async function POST(request: Request) {
 
 	// --- DETERMINE MODE ---
 	const isPuzzle = networkData.method === "puzzle";
-	const methodTitle = isPuzzle ? "Hydraulic Network Puzzle Solver" : "Hardy Cross Method";
+	const hasSuggestedFlows = !isPuzzle && networkData.pipes.some((p: any) => p.given_flow !== null && p.given_flow !== undefined);
+	const methodTitle = isPuzzle ? "Hydraulic Network Puzzle Solver" : hasSuggestedFlows ? "Hardy Cross Verification (Type 3)" : "Hardy Cross Method";
+
+	// Format Iteration History for the AI
+	let iterationInfo = "";
+	if (solution.history && solution.history.length > 0) {
+		iterationInfo = solution.history
+			.map((iter: any) => {
+				const loops = iter.loops
+					.map((L: any) => `Loop ${L.loop_index}: Sum_h=${L.sum_head_loss}, Sum_2rQ=${L.sum_derivative}, Delta_Q=${L.delta_Q}`)
+					.join("; ");
+				return `Iter ${iter.iteration}: ${loops} (Max correction: ${iter.max_correction})`;
+			})
+			.join("\n");
+	}
 
 	// --- IMPROVED PROMPT ---
 	// Base context
@@ -78,9 +92,13 @@ You are an expert hydraulics engineer explaining the ${methodTitle} step-by-step
 Pipes:
 ${pipeInfo}
 ${isPuzzle ? "(Note: Some flows or head losses are given as 'knowns', unknowns are to be found)" : ""}
+${hasSuggestedFlows ? "(Suggested Discharges were provided in the input)" : ""}
 
 Nodes:
 ${nodeInfo}
+
+**ITERATION HISTORY:**
+${iterationInfo}
 
 **SOLVER RESULTS:**
 **Pipes:**
@@ -115,6 +133,29 @@ Write a comprehensive step-by-step solution for this "missing values" puzzle. Fo
 ## 3. Final Results Verification
 - Summarize the calculated values.
 - Verify that these values satisfy continuity at all nodes.
+`;
+	} else if (hasSuggestedFlows) {
+		// TYPE 3 SPECIFIC PROMPT
+		prompt += `
+Write a comprehensive solution for this Type 3 (Verification) problem. Follow this EXACT format:
+
+### 1. Verification Conclusion
+- State clearly: "Suggested discharges **are / are not** satisfactory."
+- Base this on the magnitude of corrections ($\Delta Q$ in the first iteration). If $\Delta Q$ is large or iterations were needed, they were not satisfactory.
+
+### 2. Iteration Table
+- Create a Markdown table showing the iterations:
+  | Iter | $\\sum h$ | $\\sum (2r|Q|)$ | $\\Delta Q$ |
+
+### 3. Final Flow Distribution
+- List the **Final Corrected Flows** for each pipe in a table:
+  | Pipe | Final Q | Direction |
+
+### 4. Head Loss Check
+- Limit check: show that $\\sum h \\approx 0$ for the loops using the final flows.
+
+### 5. Detailed Steps (Optional)
+- Briefly explain the Hardy Cross application here (Equations used).
 `;
 	} else {
 		prompt += `

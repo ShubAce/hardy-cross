@@ -29,17 +29,24 @@ class PipeInput(BaseModel):
     diameter: Optional[float] = 1.0
     roughness: Optional[float] = 0.02
     resistance_k: Optional[float] = None
-    given_flow: Optional[float] = None       # New field for Puzzle Mode
-    given_head_loss: Optional[float] = None  # New field for Puzzle Mode
+    given_flow: Optional[float] = None
+    given_head_loss: Optional[float] = None
+    source: Optional[str] = "table" # Added source field
 
 class NodeInput(BaseModel):
     id: str
-    demand: Optional[float] = None  # float for known, None for unknown (?)
+    demand: Optional[float] = None
+
+class FluidInput(BaseModel):
+    density: float = 998.0
+    viscosity: float = 1.004e-6
+    temperature: Optional[float] = 20.0
 
 class NetworkInput(BaseModel):
-    method: Optional[str] = "darcy"  # "darcy" or "puzzle"
+    method: Optional[str] = "darcy"
     pipes: List[PipeInput]
     nodes: List[NodeInput]
+    fluid: Optional[FluidInput] = FluidInput()
 
 # --- ROBUSTNESS CHECKS ---
 def validate_and_fix_network(nodes: List[NodeInput], pipes: List[PipeInput], method: str = "darcy") -> Tuple[List[NodeInput], List[PipeInput]]:
@@ -458,14 +465,23 @@ def solve_network(data: NetworkInput):
         # No loops = tree network, flow is determined by continuity alone
         print("ℹ️ No loops detected - network is a tree (branching) system")
 
-    # 3. INITIALIZE FLOWS (satisfying continuity)
-    pipe_flows = initialize_flows_robust(nodes, pipes)
+    # 3. INITIALIZE FLOWS
+    # Check if we have suggested flows for all pipes (Validation Mode / Type 3)
+    # We use them as initial guesses if provided.
+    has_initial_flows = len(pipes) > 0 and all(p.given_flow is not None for p in pipes)
+    
+    if has_initial_flows:
+        print("ℹ️ Using user-provided suggested discharges as initial guesses")
+        pipe_flows = {p.id: float(p.given_flow) for p in pipes}
+    else:
+        # Standard initialization satisfying continuity
+        pipe_flows = initialize_flows_robust(nodes, pipes)
     
     # Calculate resistance coefficients for all pipes
     pipe_K = {p.id: calculate_resistance_coefficient(p) for p in pipes}
     
     # 4. HARDY CROSS ITERATION
-    MAX_ITERATIONS = 100
+    MAX_ITERATIONS = 500
     TOLERANCE = 1e-6  # Convergence tolerance for flow correction
     
     history = []
@@ -572,6 +588,10 @@ def solve_network(data: NetworkInput):
 
     # 5. COMPUTE FINAL RESULTS
     results = []
+    
+    # Use fluid properties from input or defaults
+    nu = data.fluid.viscosity if data.fluid else KINEMATIC_VISCOSITY
+    
     for pipe_id, Q in pipe_flows.items():
         pipe = pipes_map[pipe_id]
         K = pipe_K[pipe_id]
@@ -583,7 +603,7 @@ def solve_network(data: NetworkInput):
         head_loss = abs(calculate_head_loss(K, Q))
         
         # Reynolds number for reference
-        Re = (velocity * pipe.diameter) / KINEMATIC_VISCOSITY if velocity > 0 else 0
+        Re = (velocity * pipe.diameter) / nu if velocity > 0 else 0
         
         results.append({
             "pipe_id": pipe_id,
@@ -611,6 +631,19 @@ async def solve_endpoint(data: NetworkInput):
         return solve_network(data)
     except Exception as e:
         print(f"Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/initialize")
+async def initialize_endpoint(data: NetworkInput):
+    try:
+        # Validate first
+        nodes, pipes = validate_and_fix_network(data.nodes.copy(), data.pipes.copy(), method=data.method)
+        
+        # Calculate initial flows
+        initial_flows = initialize_flows_robust(nodes, pipes)
+        return initial_flows
+    except Exception as e:
+        print(f"Error in initialization: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":

@@ -29,12 +29,13 @@ const EditableCell = ({
 };
 
 export default function Home() {
-	const [image, setImage] = useState<string | null>(null);
+	const [images, setImages] = useState<string[]>([]);
 
 	// State for Editable Data
 	const [networkData, setNetworkData] = useState<any>(null); // To store method type
 	const [nodes, setNodes] = useState<any[]>([]);
 	const [pipes, setPipes] = useState<any[]>([]);
+	const [fluid, setFluid] = useState({ density: 998, viscosity: 1.004e-6, temperature: 20 });
 
 	const [solution, setSolution] = useState<any>(null);
 	const [explanation, setExplanation] = useState<string>("");
@@ -42,25 +43,51 @@ export default function Home() {
 	const [status, setStatus] = useState("");
 	const [errorMsg, setErrorMsg] = useState<string | null>(null);
 	const [step, setStep] = useState(1);
+	const [activeTab, setActiveTab] = useState<"geometry" | "boundary" | "initial" | "final" | "history">("geometry");
 
 	// Process image (shared between upload and camera)
-	const processImage = async (base64: string) => {
+	const processImages = async (base64Images: string[]) => {
+		if (base64Images.length === 0) return;
+
 		setLoading(true);
-		setStatus("Reading diagram (AI Vision)...");
+		setStatus(`Reading ${base64Images.length} diagram(s) (AI Vision)...`);
 		setErrorMsg(null);
-		setImage(base64);
 
 		try {
 			const res = await fetch("/api/analyze", {
 				method: "POST",
-				body: JSON.stringify({ image: base64 }),
+				body: JSON.stringify({ images: base64Images }),
 			});
 			const data = await res.json();
 			if (!res.ok) throw new Error(data.error);
 
-			setNetworkData({ method: data.method });
+			// Apply defaults for Type 2 per user requirements
+			let finalPipes = data.pipes || [];
+			if (data.problem_type === "TYPE_2") {
+				finalPipes = finalPipes.map((p: any) => {
+					// Defaults from user request: L=1, D=1, f=0.02
+					const length = p.length ?? 1;
+					const diameter = p.diameter ?? 1;
+					const roughness = p.roughness ?? 0.02;
+
+					let resistance_k = p.resistance_k;
+
+					// If K/R is not given, calculate it using f (Darcy-Weisbach)
+					// K = (8fL) / (π²gD⁵)
+					if (resistance_k === null || resistance_k === undefined) {
+						const g = 9.81;
+						const num = 8 * roughness * length;
+						const den = Math.PI * Math.PI * g * Math.pow(diameter, 5);
+						resistance_k = num / den;
+					}
+
+					return { ...p, length, diameter, roughness, resistance_k };
+				});
+			}
+
+			setNetworkData({ method: data.method, problem_type: data.problem_type });
 			setNodes(data.nodes || []);
-			setPipes(data.pipes || []);
+			setPipes(finalPipes);
 			setStep(2);
 		} catch (err: any) {
 			setErrorMsg(err.message);
@@ -70,15 +97,68 @@ export default function Home() {
 
 	// Upload & Vision
 	const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-		const file = e.target.files?.[0];
-		if (!file) return;
+		const files = e.target.files;
+		if (!files || files.length === 0) return;
 
-		const reader = new FileReader();
-		reader.onloadend = async () => {
-			const base64 = reader.result as string;
-			await processImage(base64);
-		};
-		reader.readAsDataURL(file);
+		const newImages: string[] = [];
+		let processed = 0;
+
+		Array.from(files).forEach((file) => {
+			const reader = new FileReader();
+			reader.onloadend = () => {
+				const base64 = reader.result as string;
+				newImages.push(base64);
+				processed++;
+
+				if (processed === files.length) {
+					// All files read, update state
+					setImages((prev) => [...prev, ...newImages]);
+				}
+			};
+			reader.readAsDataURL(file);
+		});
+	};
+
+	// Remove an image from the list
+	const removeImage = (index: number) => {
+		setImages((prev) => prev.filter((_, i) => i !== index));
+	};
+
+	// Trigger Analysis
+	const handleAnalyze = () => {
+		if (images.length === 0) {
+			setErrorMsg("Please upload at least one image.");
+			return;
+		}
+		processImages(images);
+	};
+
+	// Generate Initial Flows (Type 4)
+	const generateInitialFlows = async () => {
+		setLoading(true);
+		setStatus("Calculating initial balanced flows...");
+		try {
+			const API_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000";
+			const res = await fetch(`${API_URL}/initialize`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ method: "darcy", nodes, pipes, fluid }),
+			});
+			const flowData = await res.json();
+			if (!res.ok) throw new Error(flowData.detail || "Initialization failed");
+
+			// Update pipes with suggested flows
+			const newPipes = pipes.map((p) => ({
+				...p,
+				given_flow: flowData[p.id] !== undefined ? flowData[p.id] : null,
+			}));
+			setPipes(newPipes);
+			setStatus("Initial flows generated!");
+			setActiveTab("initial"); // Switch to view result
+		} catch (err: any) {
+			setErrorMsg(err.message);
+		}
+		setLoading(false);
 	};
 
 	// 2. Solve & Stream
@@ -91,6 +171,7 @@ export default function Home() {
 			method: networkData?.method || "darcy",
 			nodes,
 			pipes,
+			fluid,
 		};
 
 		try {
@@ -106,6 +187,7 @@ export default function Home() {
 
 			setSolution(solveResult);
 			setStep(3);
+			setActiveTab("final"); // Default to final results in Step 3
 
 			setStatus("Streaming Tutorial...");
 			const response = await fetch("/api/explain", {
@@ -138,7 +220,7 @@ export default function Home() {
 	const updatePipe = (idx: number, field: string, val: string) => {
 		const newPipes = [...pipes];
 		// If updating 'start' or 'end' nodes, keep as string. Otherwise parse float.
-		if (field === "start_node" || field === "end_node" || field === "id") {
+		if (field === "start_node" || field === "end_node" || field === "id" || field === "source") {
 			newPipes[idx][field] = val;
 		} else if (field === "resistance_k" || field === "given_flow" || field === "given_head_loss") {
 			// K and puzzle values can be empty/null
@@ -152,7 +234,7 @@ export default function Home() {
 
 	const updateNode = (idx: number, field: string, val: string) => {
 		const newNodes = [...nodes];
-		if (field === "id") {
+		if (field === "id" || field === "source") {
 			newNodes[idx][field] = val;
 		} else {
 			// Allow null/empty for puzzle mode
@@ -174,7 +256,7 @@ export default function Home() {
 						<button
 							onClick={() => {
 								setStep(1);
-								setImage(null);
+								setImages([]);
 								setExplanation("");
 								setNetworkData(null);
 							}}
@@ -197,16 +279,17 @@ export default function Home() {
 						<div className="border-4 border-dashed border-gray-300 rounded-2xl p-8 sm:p-16 text-center bg-white hover:border-blue-400 transition shadow-sm">
 							<div className="text-6xl mb-4">📐</div>
 							<h3 className="text-xl font-bold text-gray-700 mb-2">Upload Network Diagram</h3>
-							<p className="text-gray-400 mb-6">Supports PNG, JPG schematics</p>
+							<p className="text-gray-400 mb-6">Supports PNG, JPG schematics. Upload multiple images for a single problem.</p>
 							<div className="flex flex-col gap-3 sm:flex-row sm:gap-4 justify-center items-center">
 								{/* File picker - works on all devices */}
 								<label className="w-full sm:w-auto bg-blue-600 text-white px-8 py-3 rounded-full font-bold shadow-lg hover:bg-blue-700 cursor-pointer inline-flex items-center justify-center gap-2 transition">
-									<span>📁</span> Select Image
+									<span>📁</span> Add Images
 									<input
 										type="file"
 										onChange={handleUpload}
 										accept="image/*"
 										className="hidden"
+										multiple
 									/>
 								</label>
 
@@ -222,205 +305,480 @@ export default function Home() {
 									/>
 								</label>
 							</div>
+
+							{/* Image Preview List */}
+							{images.length > 0 && (
+								<div className="mt-8 space-y-4">
+									<h4 className="font-bold text-gray-700 border-b pb-2">Selected Images ({images.length})</h4>
+									<div className="grid grid-cols-3 gap-4">
+										{images.map((img, idx) => (
+											<div
+												key={idx}
+												className="relative group"
+											>
+												<img
+													src={img}
+													className="w-full h-24 object-cover rounded border"
+													alt={`Upload ${idx + 1}`}
+												/>
+												<button
+													onClick={() => removeImage(idx)}
+													className="absolute -top-2 -right-2 bg-red-500 text-white rounded-full w-6 h-6 text-2xl flex items-center justify-center opacity-70 group-hover:opacity-100 transition shadow-md pb-1"
+												>
+													×
+												</button>
+											</div>
+										))}
+									</div>
+									<button
+										onClick={handleAnalyze}
+										className="w-full bg-indigo-600 text-white font-bold py-3 rounded-xl shadow-lg hover:bg-indigo-700 transition animate-pulse"
+									>
+										Analyze Diagrams
+									</button>
+								</div>
+							)}
+
 							{loading && <p className="mt-6 text-blue-600 animate-pulse font-medium">{status}</p>}
 						</div>
 					</div>
 				)}
 
-				{/* STEP 2: EDIT & VERIFY DATA (FIXED LAYOUT) */}
+				{/* STEP 2: EDIT & VERIFY DATA (STRICT MODE SWITCHING) */}
 				{step === 2 && (
 					<div className="grid grid-cols-1 lg:grid-cols-2 gap-8 animate-fade-in-up">
-						{/* Left: Image */}
+						{/* Left: Image (Common) */}
 						<div className="bg-white p-4 rounded-xl shadow border h-fit">
-							<h3 className="font-bold text-gray-400 mb-3 uppercase text-xs tracking-wider">Original Diagram</h3>
-							{image && (
-								<img
-									src={image}
-									alt="Upload"
-									className="w-full rounded-lg border bg-gray-50"
-								/>
-							)}
+							<h3 className="font-bold text-gray-400 mb-3 uppercase text-xs tracking-wider">Original Diagrams</h3>
+							<div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+								{images.map((img, idx) => (
+									<div
+										key={idx}
+										className="relative"
+									>
+										<img
+											src={img}
+											alt={`Upload ${idx + 1}`}
+											className="w-full rounded-lg border bg-gray-50 mb-2 cursor-pointer hover:scale-105 transition duration-300"
+											onClick={() => window.open(img, "_blank")}
+										/>
+										<div className="absolute bottom-2 right-2 bg-black/50 text-white text-xs px-2 py-1 rounded backdrop-blur-sm">
+											Img {idx + 1}
+										</div>
+									</div>
+								))}
+							</div>
+							<div className="mt-4 p-3 bg-gray-50 rounded border text-xs text-gray-500">
+								<strong>Detected Mode:</strong> {networkData?.problem_type || "Legacy/Default"}
+								<p className="mt-1 opacity-70">
+									{networkData?.problem_type === "TYPE_1" && "Puzzle Mode: Find missing values."}
+									{networkData?.problem_type === "TYPE_2" && "Classic Hardy Cross: R/K given."}
+									{networkData?.problem_type === "TYPE_3" && "Verification: Check suggested flows."}
+									{(!networkData?.problem_type || networkData?.problem_type === "TYPE_4") && "Simulation: Full physics (L, D, f)."}
+								</p>
+							</div>
 						</div>
 
-						{/* Right: Editable Tables */}
+						{/* Right: UI Switcher */}
 						<div className="bg-white p-6 rounded-xl shadow border flex flex-col h-full">
-							<h2 className="text-xl font-bold mb-2 text-blue-900">Verify & Edit Data</h2>
-							<p className="text-sm text-gray-500 mb-6 bg-yellow-50 p-2 rounded border border-yellow-200">
-								<span className="font-bold">💡 Tip:</span> Check values carefully. Positive flow follows the{" "}
-								<strong>Start → End</strong> direction shown below.
-							</p>
+							{/* --- TYPE 4 (Default): PHYSICS SIMULATION UI (Tabs) --- */}
+							{(!networkData?.problem_type || networkData?.problem_type === "TYPE_4") && (
+								<>
+									<div className="flex justify-between items-center mb-4">
+										<h2 className="text-xl font-bold text-blue-900">Network Configuration</h2>
+										<div className="flex bg-gray-100 rounded-lg p-1">
+											{(["geometry", "boundary", "initial"] as const).map((tab) => (
+												<button
+													key={tab}
+													onClick={() => setActiveTab(tab)}
+													className={`px-3 py-1 text-xs font-bold rounded-md transition ${
+														activeTab === tab ? "bg-white text-blue-800 shadow-sm" : "text-gray-500 hover:text-gray-700"
+													}`}
+												>
+													{tab === "geometry" && "1. Pipe Data"}
+													{tab === "boundary" && "2. Boundary"}
+													{tab === "initial" && "3. Init Flow"}
+												</button>
+											))}
+										</div>
+									</div>
 
-							{/* PIPES TABLE - DYNAMIC HEADERS & WIDTHS */}
-							<h3 className="text-sm font-bold text-gray-700 uppercase mb-2 flex items-center gap-2">
-								<span>Pipe Properties</span>
-								<span className="text-xs font-normal text-gray-400 normal-case">
-									{networkData?.method === "puzzle"
-										? "(Enter known values, leave unknowns empty)"
-										: "(Enter K/r directly if known, or L/D/f to calculate)"}
-								</span>
-							</h3>
-							<div className="overflow-auto max-h-80 mb-8 border rounded-lg shadow-sm bg-white">
-								<table className="w-full text-sm text-left border-collapse">
-									<thead className="bg-gray-100 text-gray-600 uppercase text-xs sticky top-0 z-10">
-										<tr>
-											<th className="p-3 border-b">ID</th>
-											<th className="p-3 border-b text-center">Start</th>
-											<th className="p-3 border-b text-center">End</th>
+									{activeTab === "geometry" && (
+										<>
+											<div className="mb-4 p-3 bg-blue-50/50 rounded-lg border border-blue-100">
+												<h3 className="text-xs font-bold text-blue-900 uppercase mb-2">Fluid Properties</h3>
+												<div className="grid grid-cols-3 gap-2">
+													<div>
+														<label className="text-[10px] font-semibold text-gray-500 block">Density ρ</label>
+														<input
+															type="number"
+															value={fluid.density}
+															onChange={(e) => setFluid({ ...fluid, density: parseFloat(e.target.value) || 0 })}
+															className="w-full border rounded px-2 py-1 text-xs"
+														/>
+													</div>
+													<div>
+														<label className="text-[10px] font-semibold text-gray-500 block">Viscosity ν</label>
+														<input
+															type="text"
+															value={fluid.viscosity}
+															onChange={(e) => setFluid({ ...fluid, viscosity: parseFloat(e.target.value) || 0 })}
+															className="w-full border rounded px-2 py-1 text-xs"
+														/>
+													</div>
+													<div>
+														<label className="text-[10px] font-semibold text-gray-500 block">Temp (°C)</label>
+														<input
+															type="number"
+															value={fluid.temperature}
+															onChange={(e) => setFluid({ ...fluid, temperature: parseFloat(e.target.value) || 0 })}
+															className="w-full border rounded px-2 py-1 text-xs"
+														/>
+													</div>
+												</div>
+											</div>
+											<div className="flex-grow flex flex-col">
+												<h3 className="text-sm font-bold text-gray-700 uppercase mb-2">Pipe Geometry & Friction</h3>
+												<div className="overflow-auto flex-grow mb-4 border rounded-lg shadow-sm bg-white">
+													<table className="w-full text-sm text-left border-collapse">
+														<thead className="bg-gray-100 text-gray-600 uppercase text-xs sticky top-0 z-10">
+															<tr>
+																<th className="p-2 border-b">ID</th>
+																<th className="p-2 border-b text-center">Start</th>
+																<th className="p-2 border-b text-center">End</th>
+																<th className="p-2 border-b text-right bg-blue-50 text-blue-800">Length (m)</th>
+																<th className="p-2 border-b text-right">Diam (m)</th>
+																<th className="p-2 border-b text-right bg-orange-50 text-orange-800">f (friction)</th>
+															</tr>
+														</thead>
+														<tbody className="bg-white">
+															{pipes.map((p, i) => (
+																<tr
+																	key={i}
+																	className="border-b hover:bg-gray-50"
+																>
+																	<td className="p-2 font-bold text-gray-700">
+																		<EditableCell
+																			value={p.id}
+																			onChange={(v) => updatePipe(i, "id", v)}
+																			type="text"
+																		/>
+																	</td>
+																	<td className="p-2 text-center">{p.start_node}</td>
+																	<td className="p-2 text-center">{p.end_node}</td>
+																	<td className="p-2 bg-blue-50/30">
+																		<EditableCell
+																			value={p.length}
+																			onChange={(v) => updatePipe(i, "length", v)}
+																		/>
+																	</td>
+																	<td className="p-2">
+																		<EditableCell
+																			value={p.diameter}
+																			onChange={(v) => updatePipe(i, "diameter", v)}
+																		/>
+																	</td>
+																	<td className="p-2 bg-orange-50/10">
+																		<EditableCell
+																			value={p.roughness}
+																			onChange={(v) => updatePipe(i, "roughness", v)}
+																		/>
+																	</td>
+																</tr>
+															))}
+														</tbody>
+													</table>
+												</div>
+											</div>
+										</>
+									)}
 
-											{networkData?.method === "puzzle" ? (
-												<>
-													<th className="p-3 border-b text-right bg-green-50 text-green-800">Given Flow (Q)</th>
-													<th className="p-3 border-b text-right bg-purple-50 text-purple-800">Given HL (hf)</th>
-												</>
-											) : (
-												<>
-													<th className="p-3 border-b text-right bg-blue-50 text-blue-800">Length (m)</th>
-													<th className="p-3 border-b text-right">Diam (m)</th>
-													<th className="p-3 border-b text-right bg-orange-50 text-orange-800">f (friction)</th>
-													<th className="p-3 border-b text-right bg-purple-50 text-purple-800">Resistance (K or r)</th>
-												</>
-											)}
-										</tr>
-									</thead>
-									<tbody className="bg-white">
-										{pipes.map((p, i) => (
-											<tr
-												key={i}
-												className="border-b hover:bg-gray-50"
-											>
-												<td className="p-2 font-bold text-gray-700">
-													<EditableCell
-														value={p.id}
-														onChange={(v) => updatePipe(i, "id", v)}
-														type="text"
-													/>
-												</td>
-												<td className="p-2">
-													<EditableCell
-														value={p.start_node}
-														onChange={(v) => updatePipe(i, "start_node", v)}
-														type="text"
-													/>
-												</td>
-												<td className="p-2">
-													<EditableCell
-														value={p.end_node}
-														onChange={(v) => updatePipe(i, "end_node", v)}
-														type="text"
-													/>
-												</td>
+									{activeTab === "boundary" && (
+										<div className="flex-grow flex flex-col">
+											<div className="flex justify-between items-center mb-2">
+												<h3 className="text-sm font-bold text-gray-700 uppercase">Node Boundary Conditions</h3>
+												<span className="text-xs text-blue-600 bg-blue-50 px-2 py-1 rounded">
+													Σ Flow = {nodes.reduce((acc, n) => acc + (n.demand || 0), 0).toFixed(2)} (Should be 0)
+												</span>
+											</div>
+											<div className="overflow-auto flex-grow mb-4 border rounded-lg shadow-sm bg-white">
+												<table className="w-full text-sm text-left border-collapse">
+													<thead className="bg-gray-100 text-gray-600 uppercase text-xs sticky top-0 z-10">
+														<tr>
+															<th className="p-3 border-b">Node ID</th>
+															<th className="p-3 border-b">Type</th>
+															<th className="p-3 border-b text-right">External Flow (m³/s)</th>
+														</tr>
+													</thead>
+													<tbody className="bg-white">
+														{nodes.map((n, i) => {
+															const demand = n.demand || 0;
+															let type = "Internal";
+															if (demand > 0) type = "Inflow (Source)";
+															if (demand < 0) type = "Outflow (Sink)";
 
-												{networkData?.method === "puzzle" ? (
-													<>
-														<td className="p-2 bg-green-50/30">
+															return (
+																<tr
+																	key={i}
+																	className="border-b hover:bg-gray-50"
+																>
+																	<td className="p-3 font-bold text-gray-700">{n.id}</td>
+																	<td className="p-3">
+																		<span
+																			className={`text-xs px-2 py-1 rounded-full ${
+																				type.includes("Inflow")
+																					? "bg-green-100 text-green-800"
+																					: type.includes("Outflow")
+																					? "bg-red-100 text-red-800"
+																					: "bg-gray-100 text-gray-600"
+																			}`}
+																		>
+																			{type}
+																		</span>
+																	</td>
+																	<td className="p-3">
+																		<EditableCell
+																			value={n.demand ?? ""}
+																			placeholder="0"
+																			onChange={(v) => updateNode(i, "demand", v)}
+																		/>
+																	</td>
+																</tr>
+															);
+														})}
+													</tbody>
+												</table>
+											</div>
+										</div>
+									)}
+
+									{activeTab === "initial" && (
+										<div className="flex-grow flex flex-col">
+											<div className="flex justify-between items-center mb-2">
+												<h3 className="text-sm font-bold text-gray-700 uppercase">Initial Flow Estimates</h3>
+												<button
+													onClick={generateInitialFlows}
+													className="text-xs bg-indigo-50 text-indigo-700 px-3 py-1 rounded hover:bg-indigo-100 border border-indigo-200 transition"
+												>
+													Auto-Generate Balanced Flows
+												</button>
+											</div>
+											<div className="overflow-auto flex-grow mb-4 border rounded-lg shadow-sm bg-white">
+												<table className="w-full text-sm text-left border-collapse">
+													<thead className="bg-gray-100 text-gray-600 uppercase text-xs sticky top-0 z-10">
+														<tr>
+															<th className="p-3 border-b">Pipe ID</th>
+															<th className="p-3 border-b text-center">Direction</th>
+															<th className="p-3 border-b text-right">Initial Q (m³/s)</th>
+														</tr>
+													</thead>
+													<tbody className="bg-white">
+														{pipes.map((p, i) => {
+															const flow = p.given_flow || 0;
+															const flowDir =
+																flow >= 0 ? `${p.start_node} → ${p.end_node}` : `${p.end_node} → ${p.start_node}`;
+
+															return (
+																<tr
+																	key={i}
+																	className="border-b hover:bg-gray-50"
+																>
+																	<td className="p-3 font-bold text-gray-700">{p.id}</td>
+																	<td className="p-3 text-center text-xs text-gray-500">{flowDir}</td>
+																	<td className="p-3 bg-green-50/20">
+																		<EditableCell
+																			value={p.given_flow ?? ""}
+																			placeholder="0"
+																			onChange={(v) => updatePipe(i, "given_flow", v)}
+																		/>
+																	</td>
+																</tr>
+															);
+														})}
+													</tbody>
+												</table>
+											</div>
+											<p className="text-xs text-gray-400 italic mt-2">
+												* These are starting guesses. Hardy Cross will iteratively correct them.
+											</p>
+										</div>
+									)}
+								</>
+							)}
+
+							{/* --- TYPE 2 (Classic) & TYPE 3 (Verification) --- */}
+							{(networkData?.problem_type === "TYPE_2" || networkData?.problem_type === "TYPE_3") && (
+								<div className="flex-grow flex flex-col">
+									<h2 className="text-xl font-bold text-blue-900 mb-2">
+										{networkData?.problem_type === "TYPE_3" ? "Verify Suggested Flows" : "Hardy Cross Data"}
+									</h2>
+
+									{/* Pipes Table */}
+									<h3 className="text-sm font-bold text-gray-700 uppercase mb-2">Pipe Data (All Fields)</h3>
+									<div
+										className="overflow-auto grow mb-4 border rounded-lg shadow-sm bg-white"
+										style={{ minHeight: "200px" }}
+									>
+										<table className="w-full text-sm text-left border-collapse">
+											<thead className="bg-gray-100 text-gray-600 uppercase text-xs sticky top-0 z-10">
+												<tr>
+													<th className="p-2 border-b">ID</th>
+													<th className="p-2 border-b text-center">Start</th>
+													<th className="p-2 border-b text-center">End</th>
+													<th className="p-2 border-b text-right">L (m)</th>
+													<th className="p-2 border-b text-right">D (m)</th>
+													<th className="p-2 border-b text-right">f</th>
+													<th className="p-2 border-b text-right bg-purple-50 text-purple-800">K/r</th>
+												</tr>
+											</thead>
+											<tbody className="bg-white">
+												{pipes.map((p, i) => (
+													<tr
+														key={i}
+														className="border-b hover:bg-gray-50"
+													>
+														<td className="p-2 font-bold text-gray-700">{p.id}</td>
+														<td className="p-2 text-center text-xs">{p.start_node}</td>
+														<td className="p-2 text-center text-xs">{p.end_node}</td>
+														<td className="p-2">
+															<EditableCell
+																value={p.length}
+																onChange={(v) => updatePipe(i, "length", v)}
+															/>
+														</td>
+														<td className="p-2">
+															<EditableCell
+																value={p.diameter}
+																onChange={(v) => updatePipe(i, "diameter", v)}
+															/>
+														</td>
+														<td className="p-2">
+															<EditableCell
+																value={p.roughness}
+																onChange={(v) => updatePipe(i, "roughness", v)}
+															/>
+														</td>
+														<td className="p-2 bg-purple-50/20">
+															<EditableCell
+																value={p.resistance_k}
+																onChange={(v) => updatePipe(i, "resistance_k", v)}
+															/>
+														</td>
+													</tr>
+												))}
+											</tbody>
+										</table>
+									</div>
+
+									{/* Nodes Table */}
+									<div className="flex justify-between items-center mb-2 mt-4">
+										<h3 className="text-sm font-bold text-gray-700 uppercase">Node Demands</h3>
+										<span className="text-xs text-blue-600 bg-blue-50 px-2 py-1 rounded">
+											Σ Flow = {nodes.reduce((acc, n) => acc + (n.demand || 0), 0).toFixed(2)}
+										</span>
+									</div>
+									<div
+										className="overflow-auto grow mb-4 border rounded-lg shadow-sm bg-white"
+										style={{ minHeight: "150px" }}
+									>
+										<table className="w-full text-sm text-left border-collapse">
+											<thead className="bg-gray-100 text-gray-600 uppercase text-xs sticky top-0 z-10">
+												<tr>
+													<th className="p-3 border-b">Node ID</th>
+													<th className="p-3 border-b">Status</th>
+													<th className="p-3 border-b text-right">Demand (m³/s)</th>
+												</tr>
+											</thead>
+											<tbody className="bg-white">
+												{nodes.map((n, i) => {
+													const demand = n.demand || 0;
+													let type = "Internal";
+													let typeClass = "bg-gray-100 text-gray-600";
+													if (demand > 0) {
+														type = "Inflow (+)";
+														typeClass = "bg-green-100 text-green-800";
+													}
+													if (demand < 0) {
+														type = "Outflow (-)";
+														typeClass = "bg-red-100 text-red-800";
+													}
+
+													return (
+														<tr
+															key={i}
+															className="border-b hover:bg-gray-50"
+														>
+															<td className="p-3 font-bold text-gray-700">{n.id}</td>
+															<td className="p-3">
+																<span className={`text-xs px-2 py-1 rounded-full ${typeClass}`}>{type}</span>
+															</td>
+															<td className="p-3">
+																<EditableCell
+																	value={n.demand ?? ""}
+																	placeholder="0"
+																	onChange={(v) => updateNode(i, "demand", v)}
+																/>
+															</td>
+														</tr>
+													);
+												})}
+											</tbody>
+										</table>
+									</div>
+								</div>
+							)}
+
+							{/* --- TYPE 1: PUZZLE MODE --- */}
+							{networkData?.problem_type === "TYPE_1" && (
+								<div className="flex-grow flex flex-col">
+									<h2 className="text-xl font-bold text-blue-900 mb-4">Identify Missing Values</h2>
+									<div className="overflow-auto flex-grow mb-4 border rounded-lg shadow-sm bg-white">
+										<table className="w-full text-sm text-left border-collapse">
+											<thead className="bg-gray-100 text-gray-600 uppercase text-xs sticky top-0 z-10">
+												<tr>
+													<th className="p-3 border-b">Pipe (Nodes)</th>
+													<th className="p-3 border-b text-right">Flow Q (m³/s)</th>
+													<th className="p-3 border-b text-right">Head Loss (m)</th>
+												</tr>
+											</thead>
+											<tbody className="bg-white">
+												{pipes.map((p, i) => (
+													<tr
+														key={i}
+														className="border-b hover:bg-gray-50"
+													>
+														<td className="p-3 font-bold text-gray-700">
+															{p.id}{" "}
+															<span className="text-xs text-gray-400">
+																({p.start_node}-{p.end_node})
+															</span>
+														</td>
+														<td className="p-3 bg-blue-50/20">
 															<EditableCell
 																value={p.given_flow ?? ""}
 																placeholder="?"
 																onChange={(v) => updatePipe(i, "given_flow", v)}
 															/>
 														</td>
-														<td className="p-2 bg-purple-50/30">
+														<td className="p-3 bg-orange-50/20">
 															<EditableCell
 																value={p.given_head_loss ?? ""}
 																placeholder="?"
 																onChange={(v) => updatePipe(i, "given_head_loss", v)}
 															/>
 														</td>
-													</>
-												) : (
-													<>
-														{/* Length Column (Blue Tint) - default to 1 if not provided */}
-														<td className="p-2 bg-blue-50/30">
-															<EditableCell
-																value={p.length === 0 || p.length === null || p.length === undefined ? 1 : p.length}
-																onChange={(v) => updatePipe(i, "length", v)}
-															/>
-														</td>
-
-														{/* Diameter Column - default to 1 if not provided */}
-														<td className="p-2">
-															<EditableCell
-																value={
-																	p.diameter === 0 || p.diameter === null || p.diameter === undefined
-																		? 1
-																		: p.diameter
-																}
-																onChange={(v) => updatePipe(i, "diameter", v)}
-															/>
-														</td>
-
-														{/* Roughness Column (Orange Tint) */}
-														<td className="p-2 bg-orange-50/10">
-															<EditableCell
-																value={p.roughness}
-																onChange={(v) => updatePipe(i, "roughness", v)}
-																placeholder="0.02"
-															/>
-														</td>
-
-														{/* K/R Column (Purple Tint) - Direct resistance coefficient */}
-														<td className="p-2 bg-purple-50/10">
-															<EditableCell
-																value={p.resistance_k ?? ""}
-																onChange={(v) => updatePipe(i, "resistance_k", v)}
-																placeholder="auto"
-															/>
-														</td>
-													</>
-												)}
-											</tr>
-										))}
-									</tbody>
-								</table>
-							</div>
-							{networkData?.method !== "puzzle" && (
-								<p className="text-xs text-gray-500 mb-4 bg-purple-50 p-2 rounded border border-purple-200">
-									<strong>💡 Type 1 vs Type 2:</strong> Enter <strong>Resistance (K/r)</strong> directly if given (Type 2).
-									Otherwise, enter Length/Diameter/Friction (Type 1) and K will be calculated automatically.
-								</p>
+													</tr>
+												))}
+											</tbody>
+										</table>
+									</div>
+								</div>
 							)}
-
-							{/* NODES TABLE */}
-							<h3 className="text-sm font-bold text-gray-700 uppercase mb-2">Node Demands</h3>
-							<div className="overflow-auto max-h-60 mb-6 border rounded-lg shadow-sm">
-								<table className="w-full text-sm text-left border-collapse">
-									<thead className="bg-gray-100 text-gray-600 uppercase text-xs sticky top-0 z-10">
-										<tr>
-											<th className="p-3 border-b">Node ID</th>
-											<th className="p-3 border-b text-right">Demand (m³/s)</th>
-										</tr>
-									</thead>
-									<tbody className="bg-white">
-										{nodes.map((n, i) => (
-											<tr
-												key={i}
-												className="border-b hover:bg-gray-50"
-											>
-												<td className="p-3 font-bold text-gray-700">{n.id}</td>
-												<td className="p-3">
-													<div className="flex items-center justify-end gap-2">
-														<span className="text-xs text-gray-400">
-															{n.demand > 0 ? "(Inflow +)" : n.demand < 0 ? "(Outflow -)" : ""}
-														</span>
-														<div className="w-24">
-															<EditableCell
-																value={n.demand ?? ""}
-																placeholder={networkData?.method === "puzzle" ? "?" : "0"}
-																onChange={(v) => updateNode(i, "demand", v)}
-															/>
-														</div>
-													</div>
-												</td>
-											</tr>
-										))}
-									</tbody>
-								</table>
-							</div>
 
 							<button
 								onClick={handleSolveAndExplain}
 								disabled={loading}
-								className="w-full bg-blue-600 text-white text-lg font-bold py-4 rounded-xl shadow-lg hover:bg-blue-700 transition disabled:opacity-70 disabled:cursor-not-allowed"
+								className="mt-auto w-full bg-blue-600 text-white text-lg font-bold py-4 rounded-xl shadow-lg hover:bg-blue-700 transition disabled:opacity-70 disabled:cursor-not-allowed"
 							>
 								{loading ? (
 									<span className="flex items-center justify-center gap-2">
@@ -428,7 +786,7 @@ export default function Home() {
 										{status}
 									</span>
 								) : (
-									"Confirm Data & Solve →"
+									"Start Hardy Cross Solution →"
 								)}
 							</button>
 						</div>
@@ -442,15 +800,17 @@ export default function Home() {
 						<div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
 							{/* Image */}
 							<div className="bg-white p-4 rounded-xl shadow-lg border">
-								<h3 className="font-bold text-gray-400 mb-2 uppercase text-xs tracking-wider">Reference Diagram</h3>
-								<div className="flex items-center justify-center bg-gray-100 rounded-lg h-[400px] overflow-hidden">
-									{image && (
+								<h3 className="font-bold text-gray-400 mb-2 uppercase text-xs tracking-wider">Reference Diagrams</h3>
+								<div className="grid grid-cols-2 gap-2 h-[400px] overflow-y-auto p-2 bg-gray-50 rounded-lg">
+									{images.map((img, idx) => (
 										<img
-											src={image}
+											key={idx}
+											src={img}
 											alt="Network"
-											className="max-w-full max-h-full object-contain"
+											className="w-full h-auto object-contain border rounded shadow-sm hover:scale-105 transition"
+											onClick={() => window.open(img, "_blank")}
 										/>
-									)}
+									))}
 								</div>
 							</div>
 
